@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   AlignLeft,
   ArrowUp,
@@ -8,6 +8,7 @@ import {
   CircleDot,
   CircleMinus,
   CircleX,
+  Copy,
   Eye,
   GitBranch,
   GitCommitHorizontal,
@@ -18,6 +19,7 @@ import {
   ListTodo,
   MessageSquare,
   Pencil,
+  RefreshCw,
   SquareArrowOutUpRight,
   Tag,
   TriangleAlert,
@@ -26,7 +28,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { relativeTime, stateIcon } from "@/components/item-card";
+import { copyLink, relativeTime, stateIcon } from "@/components/item-card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -78,10 +80,38 @@ const REVIEW_LABELS: Record<string, [string, string]> = {
 };
 
 export function ItemPreview({ item, actions, todoCount, todos, boardItems, onOpenItem, onClose, onSignedOut }: Props) {
-  // Details already fetched this session, so reopening an item is instant (and then refreshed).
+  // Details already fetched this session. Reopening an item shows these without asking GitHub again; the refresh
+  // button re-fetches just this item.
   const cache = useRef(new Map<string, ItemDetails>());
   const [details, setDetails] = useState<ItemDetails | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // URLs being fetched, so the spinner belongs to the item on screen even after switching between items.
+  const [fetching, setFetching] = useState<string[]>([]);
+  const refreshing = item !== null && fetching.includes(item.url);
+  // The item on screen, so a response for one that has since been replaced is only cached, not shown.
+  const shownUrl = useRef<string | null>(null);
+  shownUrl.current = item?.url ?? null;
+
+  const fetchDetails = useCallback(
+    (target: WorkItem) => {
+      setError(null);
+      setFetching((f) => [...f, target.url]);
+      api
+        .item(target)
+        .then(
+          (next) => {
+            cache.current.set(target.url, next);
+            if (shownUrl.current === target.url) setDetails(next);
+          },
+          (e) => {
+            if (e instanceof UnauthorizedError) onSignedOut();
+            else if (shownUrl.current === target.url) setError((e as Error).message);
+          },
+        )
+        .finally(() => setFetching((f) => f.filter((url) => url !== target.url)));
+    },
+    [onSignedOut],
+  );
   const [tab, setTab] = useState<Tab>("description");
   // A comment picked in the timeline; scrolled to once the conversation tab has rendered it.
   const [scrollTarget, setScrollTarget] = useState<string | null>(null);
@@ -99,24 +129,12 @@ export function ItemPreview({ item, actions, todoCount, todos, boardItems, onOpe
 
   useEffect(() => {
     if (!item) return;
-    let current = true;
-    setDetails(cache.current.get(item.url) ?? null);
+    const cached = cache.current.get(item.url);
+    setDetails(cached ?? null);
     setError(null);
     setTab("description");
-    api.item(item).then(
-      (next) => {
-        cache.current.set(item.url, next);
-        if (current) setDetails(next);
-      },
-      (e) => {
-        if (e instanceof UnauthorizedError) onSignedOut();
-        else if (current) setError((e as Error).message);
-      },
-    );
-    return () => {
-      current = false;
-    };
-  }, [item, onSignedOut]);
+    if (!cached) fetchDetails(item);
+  }, [item, fetchDetails]);
 
   return (
     <Dialog open={item !== null} onOpenChange={(open) => !open && onClose()}>
@@ -124,7 +142,14 @@ export function ItemPreview({ item, actions, todoCount, todos, boardItems, onOpe
         <DialogContent showCloseButton={false} className="flex h-[85dvh] flex-col gap-0 p-0 sm:max-w-6xl">
           {/* The tab row lives in the header so it never scrolls; the root wraps both it and the content below. */}
           <Tabs value={tab} onValueChange={(value) => setTab(value as Tab)} className="min-h-0 flex-1 gap-0">
-            <PreviewHeader item={item} details={details} actions={actions} todoCount={todoCount} />
+            <PreviewHeader
+              item={item}
+              details={details}
+              actions={actions}
+              todoCount={todoCount}
+              refreshing={refreshing}
+              onRefresh={() => fetchDetails(item)}
+            />
             {/* Below md the sidebar stacks under the main column and both scroll together. */}
             <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-hidden">
               <div className="min-w-0 flex-1 space-y-6 p-4 md:overflow-y-auto">
@@ -156,11 +181,15 @@ function PreviewHeader({
   details,
   actions,
   todoCount,
+  refreshing,
+  onRefresh,
 }: {
   item: WorkItem;
   details: ItemDetails | null;
   actions: ReactNode;
   todoCount: number;
+  refreshing: boolean;
+  onRefresh: () => void;
 }) {
   const [StateIcon, stateClass, stateLabel] = stateIcon(item);
   return (
@@ -172,6 +201,12 @@ function PreviewHeader({
             <a href={item.url} target="_blank" rel="noreferrer">
               <SquareArrowOutUpRight /> Open on GitHub
             </a>
+          </Button>
+          <Button variant="ghost" size="icon-sm" onClick={() => copyLink(item.url)} aria-label="Copy link" title="Copy link">
+            <Copy />
+          </Button>
+          <Button variant="ghost" size="icon-sm" onClick={onRefresh} disabled={refreshing} aria-label="Refresh this item" title="Refresh this item">
+            <RefreshCw className={refreshing ? "animate-spin" : undefined} />
           </Button>
           {actions}
           {/* In the row rather than the dialog's corner, so it lines up with the other buttons. */}

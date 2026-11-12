@@ -1,8 +1,10 @@
+import { toast } from "sonner";
 import {
   CircleCheck,
   CircleDot,
   CircleSlash,
   CircleX,
+  Copy,
   EllipsisVertical,
   Eye,
   EyeOff,
@@ -49,6 +51,13 @@ export type ActionProps = {
   // The card's compact header uses the small default; the dialog matches its taller header buttons.
   buttonSize?: "icon-xs" | "icon-sm";
 };
+
+export function copyLink(url: string) {
+  navigator.clipboard.writeText(url).then(
+    () => toast.success("Link copied"),
+    () => toast.error("Couldn't copy the link"),
+  );
+}
 
 type Props = ActionProps & {
   onOpen: () => void;
@@ -259,6 +268,9 @@ export function ItemActions({ item, hidden, onToggleWatching, onHide, onAddTodo,
             <a href={item.url} target="_blank" rel="noreferrer">
               <SquareArrowOutUpRight /> Open on GitHub
             </a>
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => copyLink(item.url)}>
+            <Copy /> Copy link
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={onAddTodo}>
             <ListPlus /> Add todo

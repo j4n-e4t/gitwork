@@ -33,6 +33,8 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Toaster } from "@/components/ui/sonner";
+import { toast } from "sonner";
 import {
   api,
   isClosed,
@@ -188,6 +190,36 @@ function SignIn() {
   );
 }
 
+// A bar that empties as the hour's GitHub API points are spent; red once under a tenth is left.
+function RateLimitMeter({ rateLimit }: { rateLimit: RateLimit }) {
+  const { remaining, limit, resetAt } = rateLimit;
+  const low = remaining < limit / 10;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex justify-between gap-4">
+        <span>GitHub API points left</span>
+        <span className={cn("tabular-nums", low && "text-destructive")}>
+          {remaining.toLocaleString()} / {limit.toLocaleString()}
+        </span>
+      </div>
+      <div
+        role="meter"
+        aria-label="GitHub API points left"
+        aria-valuemin={0}
+        aria-valuemax={limit}
+        aria-valuenow={remaining}
+        className="h-1.5 overflow-hidden rounded-full bg-muted"
+      >
+        <div
+          className={cn("h-full rounded-full", low ? "bg-destructive" : "bg-primary")}
+          style={{ width: `${(remaining / limit) * 100}%` }}
+        />
+      </div>
+      <div>Resets at {new Date(resetAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</div>
+    </div>
+  );
+}
+
 function AccountMenu({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   // Fetched each time the menu opens; it costs nothing against the limit.
   const [rateLimit, setRateLimit] = useState<RateLimit | "error" | null>(null);
@@ -214,14 +246,7 @@ function AccountMenu({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
           ) : rateLimit === "error" ? (
             "GitHub API limit unavailable"
           ) : (
-            <>
-              <span className={cn(rateLimit.remaining < rateLimit.limit / 10 && "text-destructive")}>
-                {rateLimit.remaining.toLocaleString()} of {rateLimit.limit.toLocaleString()}
-              </span>{" "}
-              GitHub API points left
-              <br />
-              Resets at {new Date(rateLimit.resetAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
-            </>
+            <RateLimitMeter rateLimit={rateLimit} />
           )}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
@@ -325,9 +350,9 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
       },
     );
 
-  const toggleWatching = (item: WorkItem) => {
+  const toggleWatching = async (item: WorkItem) => {
     const watch = !item.reasons.includes("watching");
-    return mutate(
+    const ok = await mutate(
       () => api.setWatching(itemKey(item), watch),
       (v) => ({
         ...v,
@@ -339,6 +364,7 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
         }),
       }),
     );
+    if (ok && watch) toast.success(`Watching ${itemKey(item)}`);
   };
 
   const removeMissing = (ref: MissingBookmark) =>
@@ -355,10 +381,15 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
     const ref = parseItemInput(input);
     setBookmarkInput("");
     // Anything already on the board is either watched or involves you (and would have its bookmark dropped).
-    if (ref && (view?.items.some((i) => sameItem(i, ref)) || view?.missing.some((m) => sameItem(m, ref)))) return;
+    if (ref && (view?.items.some((i) => sameItem(i, ref)) || view?.missing.some((m) => sameItem(m, ref)))) {
+      toast.info(`${itemKey(ref)} is already on the board`);
+      return;
+    }
     const pending = ref && { ...ref, type: ref.type ?? (mode === "todos" ? "pr" : mode) };
     if (pending) setPendingBookmarks((p) => [...p.filter((b) => !sameItem(b, pending)), pending]);
-    if (!(await mutate(() => api.setWatching(input, true)))) {
+    if (await mutate(() => api.setWatching(input, true))) {
+      toast.success(`Watching ${ref ? itemKey(ref) : input.trim()}`);
+    } else {
       if (pending) setPendingBookmarks((p) => p.filter((b) => !sameItem(b, pending)));
       setBookmarkInput((current) => current || input);
     }
@@ -722,6 +753,7 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
         onClose={() => setPreviewItem(null)}
         onSignedOut={onSignedOut}
       />
+      <Toaster />
     </div>
   );
 }
