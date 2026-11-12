@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "types": ["node"],
+    "jsx": "preserve",
+    "paths": {}
+  },
+  "include": [".", "../worker-configuration.d.ts"]
+}

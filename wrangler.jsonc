@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gitwork",
+  "main": "server/worker.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // The built frontend. Everything else (/api, /auth) goes to the Worker; unknown paths fall back to index.html.
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/auth/*"]
+  },
+  // All data lives in one SQLite-backed Durable Object (bookmarks, sessions, ... are shared single-user data).
+  "durable_objects": { "bindings": [{ "name": "WORK_VIEW", "class_name": "WorkView" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorkView"] }],
+  "routes": [{ "pattern": "gitwork.jslop.fun", "custom_domain": true }],
+  // Only reachable through the custom domain, which Cloudflare Access protects; workers.dev and preview URLs would bypass it.
+  "workers_dev": false,
+  "preview_urls": false,
+  // Local dev overrides this from .env. Secrets (set with `wrangler secret put`): GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, ALLOWED_USERS.
+  "vars": { "APP_URL": "https://gitwork.jslop.fun" },
+  "observability": { "enabled": true }
+}
