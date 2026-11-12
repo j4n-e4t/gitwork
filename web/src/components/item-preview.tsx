@@ -28,7 +28,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { copyLink, relativeTime, stateIcon } from "@/components/item-card";
+import { copyLink, ProfileLink, relativeTime, stateIcon } from "@/components/item-card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -235,7 +235,7 @@ function PreviewHeader({
           </span>
           {details?.author && (
             <span className="flex items-center gap-1.5">
-              <PersonAvatar person={details.author} /> {details.author.login} opened {relativeTime(details.createdAt)} ago
+              <PersonAvatar person={details.author} /> <ProfileLink login={details.author.login} url={details.author.url} /> opened {relativeTime(details.createdAt)} ago
             </span>
           )}
         </div>
@@ -418,8 +418,9 @@ const REVIEW_VERBS: Record<string, [string, string]> = {
   PENDING: ["started a review", "text-muted-foreground"],
 };
 
-// The verb shown after the actor, plus a secondary line for events whose detail is free text.
-function describe(e: TimelineEvent): { verb: string; color?: string; secondary?: string } {
+// The verb shown after the actor. The timeline only says what kind of thing happened; labels, titles, assignees
+// and referencing items are left out to keep it minimal.
+function describe(e: TimelineEvent): { verb: string; color?: string } {
   switch (e.kind) {
     case "commented":
       return e.detail === "ANSWER" ? { verb: "answered", color: "text-emerald-400" } : { verb: "commented" };
@@ -440,21 +441,21 @@ function describe(e: TimelineEvent): { verb: string; color?: string; secondary?:
     case "reopened":
       return { verb: "reopened", color: "text-emerald-400" };
     case "labeled":
-      return { verb: "added label", secondary: e.detail ?? undefined };
+      return { verb: "added a label" };
     case "unlabeled":
-      return { verb: "removed label", secondary: e.detail ?? undefined };
+      return { verb: "removed a label" };
     case "assigned":
-      return { verb: `assigned ${e.detail ?? "someone"}` };
+      return { verb: "assigned someone" };
     case "review_requested":
-      return { verb: `requested review from ${e.detail ?? "someone"}` };
+      return { verb: "requested a review" };
     case "ready_for_review":
       return { verb: "marked ready for review" };
     case "converted_to_draft":
       return { verb: "converted to draft" };
     case "renamed":
-      return { verb: "renamed to", secondary: e.detail ?? undefined };
+      return { verb: "renamed" };
     case "referenced":
-      return { verb: "referenced in", secondary: e.detail ?? undefined };
+      return { verb: "referenced this" };
   }
 }
 
@@ -488,45 +489,44 @@ function Timeline({ item, details, onShowComment }: { item: WorkItem; details: I
         <ol className="relative space-y-1 before:absolute before:top-3 before:bottom-3 before:left-4 before:-translate-x-1/2 before:w-px before:bg-border">
           {details.timeline.map((e, i) => {
             const Icon = TIMELINE_ICONS[e.kind];
-            const { verb, color, secondary } = describe(e);
-            const row = (
-              <>
-                <TimelineIcon icon={Icon} color={color} actor={e.actor} />
-                <span className="min-w-0 flex-1 space-y-0.5 pt-0.5">
-                  <span className="flex items-baseline gap-1.5">
-                    <span className="min-w-0 truncate">
-                      <span className="font-medium">{e.actor?.login ?? "ghost"}</span>{" "}
-                      <span className={cn("text-muted-foreground", color)}>{verb}</span>
-                    </span>
-                    <span className="ml-auto shrink-0 text-xs text-muted-foreground" title={new Date(e.createdAt).toLocaleString()}>
-                      {relativeTime(e.createdAt)}
-                    </span>
-                  </span>
-                  {secondary && <span className="block truncate text-xs text-muted-foreground">{secondary}</span>}
-                </span>
-              </>
-            );
-            const rowClass = "flex w-full items-start gap-2 rounded-md p-1 text-left";
+            const { verb, color } = describe(e);
+            const actor = e.actor?.login ?? "ghost";
             return (
-              <li key={`${e.kind}-${e.createdAt}-${i}`}>
-                {e.url ? (
+              // The row's own link is an overlay behind the content rather than a wrapper, so the username inside can
+              // link to the profile without nesting one link in another.
+              <li key={`${e.kind}-${e.createdAt}-${i}`} className="relative flex w-full items-start gap-2 rounded-md p-1">
+                {e.url && (
                   <a
                     href={e.url}
                     target="_blank"
                     rel="noreferrer"
-                    className={cn(rowClass, "hover:bg-muted")}
+                    aria-label={`${actor} ${verb}`}
+                    className="absolute inset-0 rounded-md hover:bg-muted"
                     // Comments loaded in the conversation tab are shown there instead of opened on GitHub.
                     onClick={(ev) => {
                       if (e.kind !== "commented" || !loadedComments.has(e.url!)) return;
                       ev.preventDefault();
                       onShowComment(e.url!);
                     }}
-                  >
-                    {row}
-                  </a>
-                ) : (
-                  <div className={rowClass}>{row}</div>
+                  />
                 )}
+                {/* pointer-events is inherited through display: contents, so clicks on the icon reach the row link. */}
+                <span className="pointer-events-none contents">
+                  <TimelineIcon icon={Icon} color={color} actor={e.actor} />
+                </span>
+                <span className="pointer-events-none relative flex min-w-0 flex-1 items-baseline gap-1.5 pt-0.5">
+                  <span className="min-w-0 truncate">
+                    {e.actor ? (
+                      <ProfileLink login={actor} url={e.actor.url} className="pointer-events-auto font-medium" />
+                    ) : (
+                      <span className="font-medium">{actor}</span>
+                    )}{" "}
+                    <span className={cn("text-muted-foreground", color)}>{verb}</span>
+                  </span>
+                  <span className="ml-auto shrink-0 text-xs text-muted-foreground" title={new Date(e.createdAt).toLocaleString()}>
+                    {relativeTime(e.createdAt)}
+                  </span>
+                </span>
               </li>
             );
           })}
@@ -535,7 +535,7 @@ function Timeline({ item, details, onShowComment }: { item: WorkItem; details: I
               <TimelineIcon icon={CircleDot} actor={details.author} />
               <span className="flex min-w-0 flex-1 items-baseline gap-1.5 pt-0.5">
                 <span className="truncate">
-                  <span className="font-medium">{details.author.login}</span> <span className="text-muted-foreground">opened</span>
+                  <ProfileLink login={details.author.login} url={details.author.url} className="font-medium" /> <span className="text-muted-foreground">opened</span>
                 </span>
                 <span className="ml-auto shrink-0 text-xs text-muted-foreground">{relativeTime(details.createdAt)}</span>
               </span>
@@ -657,7 +657,7 @@ function ReviewsSummary({ pr }: { pr: NonNullable<ItemDetails["pr"]> }) {
             return (
               <li key={review.author?.login ?? i} className="flex items-center gap-2 px-1 py-0.5">
                 {review.author && <PersonAvatar person={review.author} />}
-                <span className="truncate">{review.author?.login ?? "ghost"}</span>
+                {review.author ? <ProfileLink login={review.author.login} url={review.author.url} className="truncate" /> : <span className="truncate">ghost</span>}
                 <span className={cn("shrink-0 text-xs", color)}>{label}</span>
               </li>
             );
@@ -750,7 +750,11 @@ function CommentHeader({ comment, className }: { comment: ItemComment; className
   return (
     <div className={cn("flex items-center gap-2 text-xs text-muted-foreground", className)}>
       {comment.author && <PersonAvatar person={comment.author} />}
-      <span className="font-medium text-foreground">{comment.author?.login ?? "ghost"}</span>
+      {comment.author ? (
+        <ProfileLink login={comment.author.login} url={comment.author.url} className="font-medium text-foreground" />
+      ) : (
+        <span className="font-medium text-foreground">ghost</span>
+      )}
       <a href={comment.url} target="_blank" rel="noreferrer" className="hover:underline" title={new Date(comment.createdAt).toLocaleString()}>
         {relativeTime(comment.createdAt)} ago
       </a>
@@ -810,7 +814,7 @@ function PeopleList({ people }: { people: Person[] }) {
     <div className="flex flex-wrap gap-3">
       {people.map((p) => (
         <span key={p.login} className="flex items-center gap-1.5">
-          <PersonAvatar person={p} /> {p.login}
+          <PersonAvatar person={p} /> <ProfileLink login={p.login} url={p.url} />
         </span>
       ))}
     </div>

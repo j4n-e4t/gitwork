@@ -104,6 +104,16 @@ function checksIcon(checks: PullRequest["checks"]): [LucideIcon, string, string]
   return null;
 }
 
+// A username linking to its GitHub profile. Commit authors without a GitHub account have no URL and stay plain text.
+export function ProfileLink({ login, url, className }: { login: string; url: string | null; className?: string }) {
+  if (!url) return <span className={className}>{login}</span>;
+  return (
+    <a href={url} target="_blank" rel="noreferrer" className={cn("hover:underline", className)}>
+      {login}
+    </a>
+  );
+}
+
 function IconHint({ icon: Icon, className, label }: { icon: LucideIcon; className: string; label: string }) {
   return (
     <Tooltip>
@@ -224,7 +234,7 @@ export function ItemCard({ item, hidden, onToggleWatching, onHide, onOpen, todos
               {item.authorAvatarUrl && <AvatarImage src={item.authorAvatarUrl} alt="" />}
               <AvatarFallback className="text-[0.5rem]">{item.author[0]?.toUpperCase()}</AvatarFallback>
             </Avatar>
-            <span className="leading-4 whitespace-nowrap">{item.author}</span>
+            <ProfileLink login={item.author} url={item.authorUrl ?? `https://github.com/${item.author}`} className="leading-4 whitespace-nowrap" />
           </span>
         )}
       </div>

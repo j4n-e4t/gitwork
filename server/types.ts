@@ -13,6 +13,8 @@ type ItemBase = {
   updatedAt: string;
   author: string | null;
   authorAvatarUrl: string | null;
+  // Profile page (an app page for bots). Missing from boards cached before this field existed.
+  authorUrl?: string | null;
   comments: number;
   reasons: Reason[];
 };
@@ -91,7 +93,8 @@ export type WorkView = {
 export type RateLimit = { limit: number; remaining: number; resetAt: string };
 
 // Full details for the preview dialog, fetched on demand. The card's WorkItem already covers title and state.
-export type Person = { login: string; avatarUrl: string };
+// `url` is the profile page (an app page for bots); null for commit authors without a GitHub account.
+export type Person = { login: string; avatarUrl: string; url: string | null };
 
 export type ItemComment = {
   author: Person | null;

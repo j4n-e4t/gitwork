@@ -22,7 +22,7 @@ export class GitHubAuthError extends Error {}
 const COMMON_FIELDS = `
   number title url updatedAt
   repository { name owner { login avatarUrl(size: 64) } }
-  author { login avatarUrl(size: 40) }
+  author { login avatarUrl(size: 40) url }
   comments { totalCount }
 `;
 const ITEM_FIELDS = `
@@ -84,7 +84,7 @@ type RawCommon = {
   url: string;
   updatedAt: string;
   repository: { name: string; owner: { login: string; avatarUrl: string } };
-  author: { login: string; avatarUrl: string } | null;
+  author: { login: string; avatarUrl: string; url: string } | null;
   comments: { totalCount: number };
 };
 type RawItem =
@@ -138,6 +138,7 @@ function toItem(raw: RawItem, reason: Reason): WorkItem {
     updatedAt: raw.updatedAt,
     author: raw.author?.login ?? null,
     authorAvatarUrl: raw.author?.avatarUrl ?? null,
+    authorUrl: raw.author?.url ?? null,
     comments: raw.comments.totalCount,
     reasons: [reason],
   };
@@ -262,7 +263,7 @@ export async function fetchRateLimit(token: string): Promise<RateLimit> {
   return { limit, remaining, resetAt: new Date(reset * 1000).toISOString() };
 }
 
-const PERSON = "login avatarUrl(size: 64)";
+const PERSON = "login avatarUrl(size: 64) url";
 const COMMENT_FIELDS = `author { ${PERSON} } bodyHTML createdAt url`;
 const DETAIL_COMMON = `
   author { ${PERSON} } createdAt bodyHTML
@@ -399,7 +400,7 @@ function timelineEvent(e: RawEvent): TimelineEvent | null {
   if (e.commit) {
     const author = e.commit.author;
     // Commits whose email isn't linked to a GitHub account only have a git name.
-    const actor = author?.user ?? (author?.name ? { login: author.name, avatarUrl: "" } : null);
+    const actor = author?.user ?? (author?.name ? { login: author.name, avatarUrl: "", url: null } : null);
     return { kind, actor, createdAt: e.commit.committedDate, detail: null, url: e.url ?? null };
   }
   const detail =
