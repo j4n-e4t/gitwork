@@ -129,7 +129,20 @@ export function ItemPreview({ item, actions, todoCount, todos, boardItems, onOpe
     setScrollTarget(null);
   }, [scrollTarget]);
 
+  // Collapsed comments by URL, kept for the session like the details cache.
+  const [collapsedComments, setCollapsedComments] = useState<ReadonlySet<string>>(new Set());
+  const toggleComment = (url: string) =>
+    setCollapsedComments((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(url)) next.add(url);
+      return next;
+    });
+
   const showComment = (url: string) => {
+    // Expand the comment, or the comment a reply belongs to, so there's something to scroll to.
+    const comments = [...(details?.comments.latest ?? []), ...(details?.discussion?.answer ? [details.discussion.answer] : [])];
+    const parent = comments.find((c) => c.replies?.latest.some((r) => r.url === url));
+    setCollapsedComments((prev) => new Set([...prev].filter((u) => u !== url && u !== parent?.url)));
     setTab("conversation");
     setScrollTarget(url);
   };
@@ -168,7 +181,16 @@ export function ItemPreview({ item, actions, todoCount, todos, boardItems, onOpe
                 {/* Todos come from the dashboard, so they don't wait for the details. */}
                 <TabsContent value="todos">{todos}</TabsContent>
                 {tab !== "todos" && !details && !error && <LoadingBody />}
-                {details && <PreviewBody item={item} details={details} boardItems={boardItems} onOpenItem={onOpenItem} />}
+                {details && (
+                  <PreviewBody
+                    item={item}
+                    details={details}
+                    boardItems={boardItems}
+                    onOpenItem={onOpenItem}
+                    collapsedComments={collapsedComments}
+                    onToggleComment={toggleComment}
+                  />
+                )}
               </div>
               {details && (
                 <aside className="space-y-6 border-t p-4 md:flex md:w-80 md:shrink-0 md:flex-col md:overflow-y-auto md:border-t-0 md:border-l">
@@ -277,13 +299,26 @@ function PreviewBody({
   details,
   boardItems,
   onOpenItem,
+  collapsedComments,
+  onToggleComment,
 }: {
   item: WorkItem;
   details: ItemDetails;
   boardItems: WorkItem[];
   onOpenItem: (item: WorkItem) => void;
+  collapsedComments: ReadonlySet<string>;
+  onToggleComment: (url: string) => void;
 }) {
   const { total, latest } = details.comments;
+  const commentView = (comment: ItemComment) => (
+    <CommentView
+      key={comment.url}
+      comment={comment}
+      references={details.references}
+      collapsed={collapsedComments.has(comment.url)}
+      onToggle={() => onToggleComment(comment.url)}
+    />
+  );
   return (
     <BoardContext value={{ boardItems, onOpenItem }}>
       <TabsContent value="description">
@@ -294,16 +329,17 @@ function PreviewBody({
         {details.discussion?.answer &&
           !latest.some((c) => c.isAnswer || c.replies?.latest.some((r) => r.isAnswer)) && (
           <Section title="Answer">
-            <CommentView comment={details.discussion.answer} references={details.references} />
+            {commentView(details.discussion.answer)}
           </Section>
         )}
         {total === 0 ? (
           <p className="text-muted-foreground">No comments yet.</p>
         ) : (
           <div className="space-y-3">
-            {latest.toReversed().map((comment) => (
-              <CommentView key={comment.url} comment={comment} references={details.references} />
-            ))}
+            {/* A thread line, like GitHub's, runs under the opaque cards so it only shows in the gaps between them. */}
+            <div className="relative space-y-4 before:absolute before:inset-y-0 before:left-4 before:w-px before:bg-border">
+              {latest.toReversed().map(commentView)}
+            </div>
             {total > latest.length && (
               <a href={item.url} target="_blank" rel="noreferrer" className="inline-block text-muted-foreground hover:underline">
                 Showing the latest {latest.length} · see all {total} comments on GitHub
@@ -759,15 +795,41 @@ function ChecksSummary({ checks }: { checks: NonNullable<ItemDetails["pr"]>["che
   );
 }
 
-function CommentView({ comment, references }: { comment: ItemComment; references: ItemDetails["references"] }) {
+function CommentView({
+  comment,
+  references,
+  collapsed,
+  onToggle,
+}: {
+  comment: ItemComment;
+  references: ItemDetails["references"];
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
   const replies = comment.replies;
   return (
-    <div data-comment-url={comment.url} className={cn("scroll-mt-4 overflow-hidden rounded-lg border", comment.isAnswer && "border-emerald-400/40")}>
-      <CommentHeader comment={comment} className="border-b px-3 py-2" />
-      <div className="px-3 py-2">
-        <GitHubHtml html={comment.bodyHTML} references={references} />
-      </div>
-      {replies && replies.total > 0 && (
+    <div data-comment-url={comment.url} className={cn("relative scroll-mt-4 overflow-hidden rounded-lg border bg-popover", comment.isAnswer && "border-emerald-400/40")}>
+      <CommentHeader
+        comment={comment}
+        className={cn("py-2 pr-3 pl-1.5", !collapsed && "border-b")}
+        toggle={
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? "Expand comment" : "Collapse comment"}
+            className="inline-flex size-5 shrink-0 items-center justify-center rounded hover:bg-muted hover:text-foreground"
+          >
+            <ChevronDown className={cn("size-4", collapsed && "-rotate-90")} />
+          </button>
+        }
+      />
+      {!collapsed && (
+        <div className="px-3 py-2">
+          <GitHubHtml html={comment.bodyHTML} references={references} />
+        </div>
+      )}
+      {!collapsed && replies && replies.total > 0 && (
         <div className="space-y-3 border-t bg-muted/30 px-3 py-3">
           {replies.total > replies.latest.length && (
             <a href={comment.url} target="_blank" rel="noreferrer" className="block text-xs text-muted-foreground hover:underline">
@@ -786,9 +848,10 @@ function CommentView({ comment, references }: { comment: ItemComment; references
   );
 }
 
-function CommentHeader({ comment, className }: { comment: ItemComment; className?: string }) {
+function CommentHeader({ comment, className, toggle }: { comment: ItemComment; className?: string; toggle?: ReactNode }) {
   return (
     <div className={cn("flex items-center gap-2 text-xs text-muted-foreground", className)}>
+      {toggle}
       <UserLink user={comment.author} />
       <a href={comment.url} target="_blank" rel="noreferrer" className="hover:underline" title={new Date(comment.createdAt).toLocaleString()}>
         {relativeTime(comment.createdAt)} ago
