@@ -21,7 +21,7 @@ export function initDb(durableStorage: DurableObjectStorage) {
     );
     -- key is "owner", "owner/repo" or "owner/repo#number" depending on kind.
     CREATE TABLE IF NOT EXISTS hidden (
-      kind TEXT NOT NULL CHECK (kind IN ('owner', 'repo', 'pr')),
+      kind TEXT NOT NULL CHECK (kind IN ('owner', 'repo', 'pr', 'author')),
       key TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (kind, key)
@@ -73,6 +73,24 @@ export function initDb(durableStorage: DurableObjectStorage) {
       PRIMARY KEY (login, key)
     );
   `);
+  // Databases from before author rules have a CHECK without 'author'. SQLite can't change a CHECK, so the table is
+  // rebuilt with its rows.
+  const hiddenSql = rows<{ sql: string }>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hidden'")[0]?.sql;
+  if (hiddenSql && !hiddenSql.includes("'author'")) {
+    storage.transactionSync(() => {
+      storage.sql.exec(`
+        CREATE TABLE hidden_new (
+          kind TEXT NOT NULL CHECK (kind IN ('owner', 'repo', 'pr', 'author')),
+          key TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (kind, key)
+        );
+        INSERT INTO hidden_new (kind, key, created_at) SELECT kind, key, created_at FROM hidden;
+        DROP TABLE hidden;
+        ALTER TABLE hidden_new RENAME TO hidden;
+      `);
+    });
+  }
 }
 
 function getSetting(key: string): Reason[] | null {

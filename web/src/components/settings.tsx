@@ -1,15 +1,17 @@
-import { ArrowDown, ArrowUp, Eye } from "lucide-react";
-import type { ReactNode } from "react";
+import { ArrowDown, ArrowUp, Eye, EyeOff } from "lucide-react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { reasonApplies, type HiddenItem, type Reason } from "@/lib/api";
+import { authorKey, reasonApplies, type HiddenItem, type Reason } from "@/lib/api";
 import { COLUMNS, MODES } from "@/lib/board";
 
 const HIDDEN_KINDS: { kind: HiddenItem["kind"]; title: string }[] = [
   { kind: "owner", title: "Owners" },
   { kind: "repo", title: "Repositories" },
   { kind: "pr", title: "Items" },
+  { kind: "author", title: "Authors" },
 ];
 
 type SettingsProps = {
@@ -23,6 +25,7 @@ type SettingsProps = {
   onMovePrecedence: (reason: Reason, target: Reason) => void;
   // null while the board is still loading.
   hidden: HiddenItem[] | null;
+  onHide: (item: HiddenItem) => void;
   onUnhide: (item: HiddenItem) => void;
 };
 
@@ -58,7 +61,11 @@ export function Settings(props: SettingsProps) {
         <ReasonList order={props.precedence} onMove={props.onMovePrecedence} />
       </Section>
 
-      <Section title="Hidden" description="Hide things from a card's menu on the board.">
+      <Section
+        title="Hidden"
+        description="Hide owners, repositories and items from a card's menu on the board, or hide everything by an author here."
+      >
+        <HideAuthorForm onHide={props.onHide} />
         {hidden?.length === 0 && <p className="text-sm text-muted-foreground">Nothing hidden.</p>}
         {HIDDEN_KINDS.map(({ kind, title }) => {
           const items = (hidden ?? []).filter((h) => h.kind === kind);
@@ -81,6 +88,34 @@ export function Settings(props: SettingsProps) {
         })}
       </Section>
     </div>
+  );
+}
+
+// GitHub logins are letters, digits and hyphens; bots may be typed with their "[bot]" suffix.
+const LOGIN = /^[a-z\d-]+$/;
+
+function HideAuthorForm({ onHide }: { onHide: (item: HiddenItem) => void }) {
+  const [login, setLogin] = useState("");
+  const key = authorKey(login.replace(/^@/, ""));
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!LOGIN.test(key)) return;
+    onHide({ kind: "author", key });
+    setLogin("");
+  };
+  return (
+    <form onSubmit={submit} className="flex gap-2">
+      <Input
+        value={login}
+        onChange={(e) => setLogin(e.target.value)}
+        placeholder="Hide everything by an author, e.g. dependabot"
+        aria-label="Author to hide"
+        aria-invalid={login.trim() !== "" && !LOGIN.test(key)}
+      />
+      <Button type="submit" variant="secondary" disabled={!LOGIN.test(key)}>
+        <EyeOff /> Hide author
+      </Button>
+    </form>
   );
 }
 

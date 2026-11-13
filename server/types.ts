@@ -56,7 +56,12 @@ export type MissingBookmark = { owner: string; repo: string; number: number };
 
 // kind "pr" hides a single issue, PR or discussion by "owner/repo#number"; the name predates the other types and
 // is kept so existing rows stay valid (all three share one number sequence per repo, so the key is unambiguous).
-export type HiddenItem = { kind: "owner" | "repo" | "pr"; key: string };
+// kind "author" hides everything opened by a user or bot, keyed by authorKey.
+export type HiddenItem = { kind: "owner" | "repo" | "pr" | "author"; key: string };
+
+// How an author rule matches a login: case-insensitive, and "dependabot[bot]" (how GitHub's REST API and web UI
+// name bots) is the same author as "dependabot" (how GraphQL, which the board uses, names them).
+export const authorKey = (login: string) => login.trim().toLowerCase().replace(/\[bot\]$/, "");
 
 // A GitHub item a todo is attached to. The title is a snapshot from when it was linked, for items no longer on the board.
 export type TodoLink = { type: ItemType; owner: string; repo: string; number: number; title: string };

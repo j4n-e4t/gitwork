@@ -26,7 +26,7 @@ import {
 } from "./db.ts";
 import { currentSession, endSession, handleAuth } from "./auth.ts";
 import { fetchItemDetails, fetchItemsByRef, fetchProfile, fetchRateLimit, fetchWorkView, GitHubAuthError } from "./github.ts";
-import { isClosed, REASONS, type HiddenItem, type ItemType, type Reason, type Todo, type GitHubWorkView } from "./types.ts";
+import { authorKey, isClosed, REASONS, type HiddenItem, type ItemType, type Reason, type Todo, type GitHubWorkView } from "./types.ts";
 
 // Accepts "https://github.com/owner/repo/pull/123", ".../issues/123", ".../discussions/123" or "owner/repo#123".
 function parseItemRef(input: unknown): ItemRef | null {
@@ -41,12 +41,14 @@ const HIDDEN_KEY_PATTERNS: Record<HiddenItem["kind"], RegExp> = {
   owner: /^[\w.-]+$/,
   repo: /^[\w.-]+\/[\w.-]+$/,
   pr: /^[\w.-]+\/[\w.-]+#\d+$/,
+  author: /^[a-z\d-]+$/,
 };
 
 function parseHidden(input: unknown): HiddenItem | null {
   const { kind, key } = (input ?? {}) as { kind?: unknown; key?: unknown };
   if (typeof kind !== "string" || typeof key !== "string" || !(kind in HIDDEN_KEY_PATTERNS)) return null;
-  return HIDDEN_KEY_PATTERNS[kind as HiddenItem["kind"]].test(key) ? { kind: kind as HiddenItem["kind"], key } : null;
+  const normalized = kind === "author" ? authorKey(key) : key;
+  return HIDDEN_KEY_PATTERNS[kind as HiddenItem["kind"]].test(normalized) ? { kind: kind as HiddenItem["kind"], key: normalized } : null;
 }
 
 // Column order and precedence must each contain every reason exactly once.

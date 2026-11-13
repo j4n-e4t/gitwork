@@ -1,4 +1,5 @@
 import {
+  authorKey,
   REASONS,
   type HiddenItem,
   type ItemDetails,
@@ -11,7 +12,7 @@ import {
   type WorkView,
 } from "../../../server/types.ts";
 
-export { isClosed, referenceKey } from "../../../server/types.ts";
+export { authorKey, isClosed, referenceKey } from "../../../server/types.ts";
 export type { CheckStatus, Discussion, HiddenItem, Issue, ItemComment, ItemDetails, ItemType, LinkedItem, Person, MissingBookmark, ProfileSummary, PullRequest, RateLimit, Reason, ReferencedItem, TimelineEvent, Todo, TodoLink, WorkItem, WorkView } from "../../../server/types.ts";
 
 export type Me = { login: string; avatarUrl: string };
@@ -76,7 +77,8 @@ export function isHidden(item: WorkItem, hidden: HiddenItem[]) {
     (h) =>
       (h.kind === "owner" && h.key === item.owner) ||
       (h.kind === "repo" && h.key === `${item.owner}/${item.repo}`) ||
-      (h.kind === "pr" && h.key === itemKey(item)),
+      (h.kind === "pr" && h.key === itemKey(item)) ||
+      (h.kind === "author" && item.author !== null && h.key === authorKey(item.author)),
   );
 }
 

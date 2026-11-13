@@ -574,6 +574,7 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
             onMovePrecedence={movePrecedence}
             onMoveColumn={moveColumn}
             hidden={view?.hidden ?? null}
+            onHide={(item) => setHidden(item, true)}
             onUnhide={(item) => setHidden(item, false)}
           />
         </main>
