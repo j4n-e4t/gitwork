@@ -15,6 +15,12 @@ const HIDDEN_KINDS: { kind: HiddenItem["kind"]; title: string }[] = [
 ];
 
 type SettingsProps = {
+  summaryEnabled: boolean;
+  // False when the server has no Gemini key, which leaves the switch off and disabled.
+  summaryAvailable: boolean;
+  onSummaryEnabledChange: (enabled: boolean) => void;
+  todosEnabled: boolean;
+  onTodosEnabledChange: (enabled: boolean) => void;
   showHidden: boolean;
   onShowHiddenChange: (show: boolean) => void;
   showCheckedOff: boolean;
@@ -47,6 +53,28 @@ export function Settings(props: SettingsProps) {
           description="Hidden owners, repositories and items appear dimmed on the board."
           checked={props.showHidden}
           onCheckedChange={props.onShowHiddenChange}
+        />
+      </Section>
+
+      <Section title="Features" description="Optional features, off by default.">
+        <SwitchRow
+          id="feature-summary"
+          label="AI summaries"
+          description={
+            props.summaryAvailable
+              ? "A Summary tab in the item preview that writes a short overview with Gemini. The item's text and metadata are sent to Google."
+              : "Unavailable: the server has no Gemini API key (GOOGLE_GENERATIVE_AI_API_KEY)."
+          }
+          disabled={!props.summaryAvailable}
+          checked={props.summaryEnabled}
+          onCheckedChange={props.onSummaryEnabledChange}
+        />
+        <SwitchRow
+          id="feature-todos"
+          label="Todos"
+          description="Tasks with optional deadlines, linked to items if you like: a Todos view, counts on cards and a Todos tab in the preview."
+          checked={props.todosEnabled}
+          onCheckedChange={props.onTodosEnabledChange}
         />
       </Section>
 
@@ -176,6 +204,7 @@ function SwitchRow(props: {
   label: string;
   description: string;
   checked: boolean;
+  disabled?: boolean;
   onCheckedChange: (checked: boolean) => void;
 }) {
   return (
@@ -184,7 +213,7 @@ function SwitchRow(props: {
         <Label htmlFor={props.id}>{props.label}</Label>
         <p className="text-xs text-muted-foreground">{props.description}</p>
       </div>
-      <Switch id={props.id} checked={props.checked} onCheckedChange={props.onCheckedChange} />
+      <Switch id={props.id} checked={props.checked} disabled={props.disabled} onCheckedChange={props.onCheckedChange} />
     </div>
   );
 }

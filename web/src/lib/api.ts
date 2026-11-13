@@ -3,6 +3,7 @@ import {
   REASONS,
   type HiddenItem,
   type ItemDetails,
+  type ItemSummary,
   type ItemType,
   type ProfileSummary,
   type RateLimit,
@@ -13,9 +14,10 @@ import {
 } from "../../../server/types.ts";
 
 export { authorKey, isClosed, referenceKey } from "../../../server/types.ts";
-export type { CheckStatus, Discussion, HiddenItem, Issue, ItemComment, ItemDetails, ItemType, LinkedItem, Person, MissingBookmark, ProfileSummary, PullRequest, RateLimit, Reason, ReferencedItem, TimelineEvent, Todo, TodoLink, WorkItem, WorkView } from "../../../server/types.ts";
+export type { CheckStatus, Discussion, HiddenItem, Issue, ItemComment, ItemDetails, ItemSummary, ItemType, LinkedItem, Person, MissingBookmark, ProfileSummary, PullRequest, RateLimit, Reason, ReferencedItem, TimelineEvent, Todo, TodoLink, WorkItem, WorkView } from "../../../server/types.ts";
 
-export type Me = { login: string; avatarUrl: string };
+// summaryAvailable: whether the server has a Gemini key. Missing from sign-ins cached before it existed.
+export type Me = { login: string; avatarUrl: string; summaryAvailable?: boolean };
 
 /** The session is missing, expired or its GitHub token was revoked. */
 export class UnauthorizedError extends Error {}
@@ -40,6 +42,11 @@ export const api = {
   item: async (item: WorkItem): Promise<ItemDetails> => {
     const params = new URLSearchParams({ type: item.type, owner: item.owner, repo: item.repo, number: String(item.number) });
     return (await request(`/api/item?${params}`)).json();
+  },
+  // The cached AI summary, or null; `generate` writes a new one (several seconds).
+  summary: async (item: WorkItem, generate = false): Promise<ItemSummary | null> => {
+    const params = new URLSearchParams({ type: item.type, owner: item.owner, repo: item.repo, number: String(item.number) });
+    return (await request(`/api/summary?${params}`, { method: generate ? "POST" : "GET" })).json();
   },
   profile: async (login: string): Promise<ProfileSummary> => (await request(`/api/profile?${new URLSearchParams({ login })}`)).json(),
   logout: () => request("/auth/logout", { method: "POST" }),

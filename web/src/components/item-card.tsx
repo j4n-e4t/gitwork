@@ -48,7 +48,8 @@ export type ActionProps = {
   hidden: boolean;
   onToggleWatching: () => void;
   onHide: (item: HiddenItem) => void;
-  onAddTodo: () => void;
+  // Omitted when the todos feature is off, which drops the menu item.
+  onAddTodo?: () => void;
   // The card's compact header uses the small default; the dialog matches its taller header buttons.
   buttonSize?: "icon-xs" | "icon-sm";
 };
@@ -283,9 +284,11 @@ export function ItemActions({ item, hidden, onToggleWatching, onHide, onAddTodo,
           <DropdownMenuItem onSelect={() => copyLink(item.url)}>
             <Copy /> Copy link
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={onAddTodo}>
-            <ListPlus /> Add todo
-          </DropdownMenuItem>
+          {onAddTodo && (
+            <DropdownMenuItem onSelect={onAddTodo}>
+              <ListPlus /> Add todo
+            </DropdownMenuItem>
+          )}
           <DropdownMenuSeparator />
           {hidden ? (
             <DropdownMenuItem disabled>

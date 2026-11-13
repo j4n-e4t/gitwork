@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   AlignLeft,
@@ -22,6 +22,7 @@ import {
   MessagesSquare,
   Pencil,
   RefreshCw,
+  Sparkles,
   SquareArrowOutUpRight,
   Tag,
   TriangleAlert,
@@ -45,6 +46,7 @@ import {
   type CheckStatus,
   type ItemComment,
   type ItemDetails,
+  type ItemSummary,
   itemKey,
   type LinkedItem,
   sameItem,
@@ -60,6 +62,9 @@ type Props = {
   item: WorkItem | null;
   // The card's actions (watch, menu, check off), rendered in the header.
   actions: ReactNode;
+  // Optional features from Settings; each one's tab is only shown when it's on.
+  summaryEnabled: boolean;
+  todosEnabled: boolean;
   // The item's open todos from the dashboard, shown in their own tab.
   todoCount: number;
   todos: ReactNode;
@@ -86,7 +91,7 @@ const REVIEW_LABELS: Record<string, [string, string]> = {
   PENDING: ["Pending", "text-muted-foreground"],
 };
 
-export function ItemPreview({ item, actions, todoCount, todos, boardItems, onOpenItem, onClose, onSignedOut }: Props) {
+export function ItemPreview({ item, actions, summaryEnabled, todosEnabled, todoCount, todos, boardItems, onOpenItem, onClose, onSignedOut }: Props) {
   // Details already fetched this session. Reopening an item shows these without asking GitHub again; the refresh
   // button re-fetches just this item.
   const cache = useRef(new Map<string, ItemDetails>());
@@ -166,6 +171,8 @@ export function ItemPreview({ item, actions, todoCount, todos, boardItems, onOpe
               item={item}
               details={details}
               actions={actions}
+              summaryEnabled={summaryEnabled}
+              todosEnabled={todosEnabled}
               todoCount={todoCount}
               refreshing={refreshing}
               onRefresh={() => fetchDetails(item)}
@@ -178,9 +185,18 @@ export function ItemPreview({ item, actions, todoCount, todos, boardItems, onOpe
                     <TriangleAlert className="size-4" /> {error}
                   </p>
                 )}
+                {/* Keyed so each item starts from its own cached summary. Doesn't wait for the details; they only add
+                    states and hover cards to its references. */}
+                {summaryEnabled && (
+                  <TabsContent value="summary">
+                    <BoardContext value={{ boardItems, onOpenItem }}>
+                      <SummaryView key={item.url} item={item} references={details?.references ?? {}} onSignedOut={onSignedOut} />
+                    </BoardContext>
+                  </TabsContent>
+                )}
                 {/* Todos come from the dashboard, so they don't wait for the details. */}
-                <TabsContent value="todos">{todos}</TabsContent>
-                {tab !== "todos" && !details && !error && <LoadingBody />}
+                {todosEnabled && <TabsContent value="todos">{todos}</TabsContent>}
+                {tab !== "todos" && tab !== "summary" && !details && !error && <LoadingBody />}
                 {details && (
                   <PreviewBody
                     item={item}
@@ -209,6 +225,8 @@ function PreviewHeader({
   item,
   details,
   actions,
+  summaryEnabled,
+  todosEnabled,
   todoCount,
   refreshing,
   onRefresh,
@@ -216,6 +234,8 @@ function PreviewHeader({
   item: WorkItem;
   details: ItemDetails | null;
   actions: ReactNode;
+  summaryEnabled: boolean;
+  todosEnabled: boolean;
   todoCount: number;
   refreshing: boolean;
   onRefresh: () => void;
@@ -272,6 +292,11 @@ function PreviewHeader({
       {/* The active tab's underline sits on the header's bottom border. */}
       <div className="mt-1 flex items-center gap-3">
         <TabsList variant="line">
+          {summaryEnabled && (
+            <TabsTrigger value="summary">
+              <RainbowSparkles /> Summary
+            </TabsTrigger>
+          )}
           <TabsTrigger value="description">
             <AlignLeft /> Description
           </TabsTrigger>
@@ -281,9 +306,11 @@ function PreviewHeader({
           <TabsTrigger value="linked">
             <Link2 /> Linked {details && <span className="text-xs text-muted-foreground">{details.linked.length}</span>}
           </TabsTrigger>
-          <TabsTrigger value="todos">
-            <ListTodo /> Todos <span className="text-xs text-muted-foreground">{todoCount}</span>
-          </TabsTrigger>
+          {todosEnabled && (
+            <TabsTrigger value="todos">
+              <ListTodo /> Todos <span className="text-xs text-muted-foreground">{todoCount}</span>
+            </TabsTrigger>
+          )}
         </TabsList>
         {details && details.involved.length > 0 && <UserStack users={details.involved} className="ml-auto hidden sm:flex" />}
       </div>
@@ -291,7 +318,7 @@ function PreviewHeader({
   );
 }
 
-type Tab = "description" | "conversation" | "linked" | "todos";
+type Tab = "summary" | "description" | "conversation" | "linked" | "todos";
 
 // The conversation tab lists the latest comments newest first.
 function PreviewBody({
@@ -991,7 +1018,7 @@ function findHeadings(root: Element): Heading[] {
   return headings;
 }
 
-function ReferenceChip({ reference: { kind, text, href, key }, resolved }: { reference: Reference; resolved: ItemDetails["references"] }) {
+function ReferenceChip({ reference: { kind, text, href, key }, resolved }: { reference: Omit<Reference, "slot">; resolved: ItemDetails["references"] }) {
   if (kind === "user") return <UserLink user={{ login: text, url: href }} pill className="not-prose" />;
   const item = key ? resolved[key] : undefined;
   const { onClick } = useBoardLink(item);
@@ -1059,6 +1086,134 @@ function PeopleList({ people }: { people: Person[] }) {
       {people.map((p) => (
         <UserLink key={p.login} user={p} />
       ))}
+    </div>
+  );
+}
+
+const SUMMARY_ROWS: [keyof ItemSummary, string][] = [
+  ["what", "What"],
+  ["who", "Who"],
+  ["why", "Why"],
+  ["related", "Related"],
+  ["status", "Status"],
+];
+
+// @login, #number and owner/repo#number in the model's plain text. Not after a word character, so emails and
+// URL fragments stay text.
+const SUMMARY_TOKEN = /(?<![\w.@])@([a-z\d](?:[a-z\d-]*[a-z\d])?(?:\[bot\])?)|(?<![\w/#])(?:([\w.-]+)\/([\w.-]+))?#(\d+)\b/gi;
+
+// Summary text with mentions and references shown like those in descriptions. References take their state and
+// hover card from the item's resolved references; ones not found there (rare, as they usually come from the
+// body or comments) stay neutral.
+function SummaryText({ text, item, references }: { text: string; item: WorkItem; references: ItemDetails["references"] }) {
+  const parts: ReactNode[] = [];
+  let last = 0;
+  for (const m of text.matchAll(SUMMARY_TOKEN)) {
+    parts.push(text.slice(last, m.index));
+    last = m.index + m[0].length;
+    const [, login, owner = item.owner, repo = item.repo, number] = m;
+    if (login) {
+      parts.push(<UserLink key={m.index} user={{ login }} pill />);
+      continue;
+    }
+    const key = `${owner}/${repo}#${number}`.toLowerCase();
+    const resolved = references[key];
+    const sameRepo = `${owner}/${repo}`.toLowerCase() === `${item.owner}/${item.repo}`.toLowerCase();
+    const kind = resolved?.type === "pr" ? "pull_request" : (resolved?.type ?? "issue");
+    const reference = { kind, text: sameRepo ? `#${number}` : `${owner}/${repo}#${number}`, href: resolved?.url ?? `https://github.com/${owner}/${repo}/issues/${number}`, key } satisfies Omit<Reference, "slot">;
+    parts.push(<ReferenceChip key={m.index} reference={reference} resolved={references} />);
+  }
+  parts.push(text.slice(last));
+  return parts;
+}
+
+// A soft rainbow: every hue at the same lightness and low chroma, so on a 16px icon it reads as one gentle tint
+// rather than a spectrum. The only color the AI summary adds to the UI.
+const RAINBOW = [20, 80, 150, 230, 300].map((hue) => `oklch(0.8 0.1 ${hue})`);
+
+// The AI sparkle, stroked with the rainbow. The gradient id is per instance, since several
+// icons can be on screen at once.
+function RainbowSparkles({ className }: { className?: string }) {
+  const id = useId();
+  return (
+    <Sparkles className={className} stroke={`url(#${CSS.escape(id)})`} aria-hidden>
+      <defs>
+        {/* In the icon's 24×24 space: a per-path bounding box would be empty for the straight strokes, hiding them. */}
+        <linearGradient id={id} gradientUnits="userSpaceOnUse" x1="2" y1="2" x2="22" y2="22">
+          {RAINBOW.map((color, i) => (
+            <stop key={color} offset={i / (RAINBOW.length - 1)} stopColor={color} />
+          ))}
+        </linearGradient>
+      </defs>
+    </Sparkles>
+  );
+}
+
+// AI summary of the item, written on request from its full description, conversation and metadata: the TL;DR as
+// a lead, then labelled rows (styled like the sidebar's section titles) so short answers don't float in whitespace.
+function SummaryView({ item, references, onSignedOut }: { item: WorkItem; references: ItemDetails["references"]; onSignedOut: () => void }) {
+  const [summary, setSummary] = useState<ItemSummary | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fail = useCallback((e: unknown) => (e instanceof UnauthorizedError ? onSignedOut() : setError((e as Error).message)), [onSignedOut]);
+
+  useEffect(() => {
+    api.summary(item).then(setSummary, fail);
+  }, [item, fail]);
+
+  const generate = () => {
+    setGenerating(true);
+    setError(null);
+    api
+      .summary(item, true)
+      .then(setSummary, fail)
+      .finally(() => setGenerating(false));
+  };
+
+  const text = (value: string) => <SummaryText text={value} item={item} references={references} />;
+  const outdated = summary !== null && item.updatedAt > summary.itemUpdatedAt;
+  return (
+    <div className="space-y-4" aria-busy={generating}>
+      {error && (
+        <p role="alert" className="flex items-center gap-2 text-destructive">
+          <TriangleAlert className="size-4 shrink-0" /> {error}
+        </p>
+      )}
+      {!summary && !generating && (
+        <div className="space-y-3">
+          <p className="text-muted-foreground">A short AI summary of the description, conversation and metadata.</p>
+          <Button variant="outline" size="sm" onClick={generate}>
+            <RainbowSparkles /> Summarize
+          </Button>
+        </div>
+      )}
+      {!summary && generating && <LoadingBody />}
+      {summary && (
+        <>
+          <div className={cn("space-y-4 transition-opacity", generating && "opacity-50")}>
+            <p className="text-base leading-relaxed">{text(summary.tldr)}</p>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2.5">
+              {/* Fields the model left empty (nothing to say) are skipped. */}
+              {SUMMARY_ROWS.filter(([key]) => summary[key].trim()).map(([key, label]) => (
+                <div key={key} className="contents">
+                  <dt className="text-xs leading-6 font-medium tracking-wide text-muted-foreground uppercase">{label}</dt>
+                  <dd className="leading-6">{text(summary[key])}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+          <div className="flex items-center gap-2 border-t pt-3 text-xs text-muted-foreground">
+            <span className="min-w-0 truncate" title={`${summary.model}, ${new Date(summary.generatedAt).toLocaleString()}`}>
+              Generated {relativeTime(summary.generatedAt)} ago
+              {outdated && <span className="text-amber-400"> · item updated since</span>}
+            </span>
+            <Button variant="ghost" size="xs" className="ml-auto" onClick={generate} disabled={generating}>
+              <RefreshCw className={generating ? "animate-spin" : undefined} /> {generating ? "Regenerating…" : "Regenerate"}
+            </Button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

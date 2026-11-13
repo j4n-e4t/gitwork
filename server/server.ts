@@ -7,6 +7,7 @@ import {
   getCachedWork,
   getColumnOrder,
   getPrecedence,
+  getSummary,
   listBookmarks,
   listDismissed,
   listHidden,
@@ -15,6 +16,7 @@ import {
   removeBookmark,
   removeDismissed,
   removeHidden,
+  saveSummary,
   saveTodo,
   setCachedWork,
   setColumnOrder,
@@ -25,7 +27,8 @@ import {
   type Session,
 } from "./db.ts";
 import { currentSession, endSession, handleAuth } from "./auth.ts";
-import { fetchItemDetails, fetchItemsByRef, fetchProfile, fetchRateLimit, fetchWorkView, GitHubAuthError } from "./github.ts";
+import { summarize, summaryAvailable } from "./summary.ts";
+import { fetchItemContext, fetchItemDetails, fetchItemsByRef, fetchProfile, fetchRateLimit, fetchWorkView, GitHubAuthError } from "./github.ts";
 import { authorKey, isClosed, REASONS, type HiddenItem, type ItemType, type Reason, type Todo, type GitHubWorkView } from "./types.ts";
 
 // Accepts "https://github.com/owner/repo/pull/123", ".../issues/123", ".../discussions/123" or "owner/repo#123".
@@ -169,7 +172,7 @@ export async function handleRequest(req: Request) {
   if (!session) return Response.json({ error: "Not signed in" }, { status: 401 });
 
   if (pathname === "/api/me" && req.method === "GET") {
-    return Response.json({ login: session.login, avatarUrl: session.avatarUrl });
+    return Response.json({ login: session.login, avatarUrl: session.avatarUrl, summaryAvailable: summaryAvailable() });
   }
   if (pathname === "/api/rate-limit" && req.method === "GET") {
     try {
@@ -190,6 +193,31 @@ export async function handleRequest(req: Request) {
       return details ? Response.json(details) : Response.json({ error: "Not found or no access" }, { status: 404 });
     } catch (error) {
       return githubFailure(error, session);
+    }
+  }
+  // GET returns the cached summary (null if there is none); POST generates a new one, which replaces it.
+  if (pathname === "/api/summary" && (req.method === "GET" || req.method === "POST")) {
+    const params = new URL(req.url).searchParams;
+    const type = params.get("type") as ItemType | null;
+    const ref = parseItemRef(`${params.get("owner")}/${params.get("repo")}#${params.get("number")}`);
+    if (!ref || !type || !ITEM_TYPES.includes(type)) {
+      return Response.json({ error: "Expected type (pr|issue|discussion), owner, repo and number" }, { status: 400 });
+    }
+    if (req.method === "GET") return Response.json(getSummary(ref));
+    let context;
+    try {
+      context = await fetchItemContext(session.token, type, ref);
+    } catch (error) {
+      return githubFailure(error, session);
+    }
+    if (!context) return Response.json({ error: "Not found or no access" }, { status: 404 });
+    try {
+      const summary = await summarize(context.text, context.updatedAt);
+      saveSummary(ref, summary);
+      return Response.json(summary);
+    } catch (error) {
+      console.error(error);
+      return Response.json({ error: `Summary failed: ${(error as Error).message}` }, { status: 502 });
     }
   }
   if (pathname === "/api/profile" && req.method === "GET") {

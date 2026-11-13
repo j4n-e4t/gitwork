@@ -613,3 +613,192 @@ export async function fetchProfile(token: string, login: string): Promise<Profil
     createdAt: raw.createdAt,
   };
 }
+
+// Everything the AI summary reads about an item, as plain text: markdown bodies rather than rendered HTML, every
+// comment rather than the latest few, and no diff (the file list and commit messages stand in for it).
+const CONTEXT_LINKED = "number title url state repository { nameWithOwner }";
+const CONTEXT_COMMON = `
+  title url createdAt updatedAt author { login } body
+  labels(first: 30) { nodes { name } }
+`;
+const CONTEXT_QUERIES: Record<ItemType, string> = {
+  pr: `pullRequest(number: $number) {
+    ${CONTEXT_COMMON}
+    state isDraft mergeable reviewDecision baseRefName headRefName additions deletions changedFiles
+    milestone { title }
+    assignees(first: 20) { nodes { login } }
+    participants(first: 100) { nodes { login } }
+    reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } ... on Mannequin { login } } } }
+    closingIssuesReferences(first: 20) { nodes { ${CONTEXT_LINKED} } }
+    files(first: 100) { nodes { path additions deletions } }
+    commits(last: 100) { totalCount nodes { commit { messageHeadline author { name user { login } } } } }
+    reviews(first: 100) { nodes { author { login } state body submittedAt } }
+    reviewThreads(first: 100) { nodes { path isResolved comments(first: 30) { nodes { author { login } body createdAt } } } }
+    timelineItems(last: 100, itemTypes: [${PR_EVENT_TYPES}]) { nodes { ${PR_EVENTS} } }
+    statusCheckRollup: commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+      __typename
+      ... on CheckRun { name status conclusion detailsUrl }
+      ... on StatusContext { context state targetUrl }
+    } } } } } }
+  }`,
+  issue: `issue(number: $number) {
+    ${CONTEXT_COMMON}
+    state stateReason
+    milestone { title }
+    assignees(first: 20) { nodes { login } }
+    participants(first: 100) { nodes { login } }
+    closedByPullRequestsReferences(first: 20, includeClosedPrs: true) { nodes { ${CONTEXT_LINKED} } }
+    timelineItems(last: 100, itemTypes: [${ISSUE_EVENT_TYPES}]) { nodes { ${ISSUE_EVENTS} } }
+  }`,
+  discussion: `discussion(number: $number) {
+    ${CONTEXT_COMMON}
+    closed stateReason isAnswered locked upvoteCount
+    category { name }
+    answer { author { login } body }
+  }`,
+};
+const CONTEXT_COMMENT = "author { login } body createdAt";
+const CONTEXT_COMMENT_FIELDS: Record<ItemType, string> = {
+  pr: CONTEXT_COMMENT,
+  issue: CONTEXT_COMMENT,
+  discussion: `${CONTEXT_COMMENT} isAnswer replies(first: 50) { nodes { ${CONTEXT_COMMENT} } }`,
+};
+const CONTEXT_FIELD: Record<ItemType, string> = { pr: "pullRequest", issue: "issue", discussion: "discussion" };
+// 100 per page; threads longer than this are rare and the summary leans on the latest activity anyway.
+const MAX_COMMENT_PAGES = 10;
+
+type ContextComment = { author: { login: string } | null; body: string; createdAt: string; isAnswer?: boolean; replies?: { nodes: ContextComment[] } };
+type ContextLinked = { number: number; title: string; url: string; state: string; repository: { nameWithOwner: string } };
+
+const who = (author: { login: string } | null | undefined) => (author ? `@${author.login}` : "(deleted user)");
+const day = (iso: string) => iso.slice(0, 10);
+const logins = (nodes: { login?: string }[] | undefined) => (nodes ?? []).map((n) => n.login && `@${n.login}`).filter(Boolean).join(", ") || "none";
+
+async function fetchAllComments(token: string, type: ItemType, ref: ItemRef) {
+  const comments: ContextComment[] = [];
+  let after: string | null = null;
+  let total = 0;
+  for (let page = 0; page < MAX_COMMENT_PAGES; page++) {
+    const data = await graphql(
+      token,
+      `query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+        repository(owner: $owner, name: $repo) { item: ${CONTEXT_FIELD[type]}(number: $number) {
+          comments(first: 100, after: $after) { totalCount pageInfo { hasNextPage endCursor } nodes { ${CONTEXT_COMMENT_FIELDS[type]} } }
+        } }
+      }`,
+      { owner: ref.owner, repo: ref.repo, number: ref.number, after },
+    );
+    const page_ = data.repository?.item?.comments;
+    if (!page_) break;
+    total = page_.totalCount;
+    comments.push(...page_.nodes);
+    if (!page_.pageInfo.hasNextPage) break;
+    after = page_.pageInfo.endCursor;
+  }
+  return { comments, total };
+}
+
+/** The item and its surroundings as a plain-text document for the AI summary, or null if it doesn't exist. */
+export async function fetchItemContext(token: string, type: ItemType, ref: ItemRef): Promise<{ updatedAt: string; text: string } | null> {
+  const [data, { comments, total }] = await Promise.all([
+    graphql(
+      token,
+      `query($owner: String!, $repo: String!, $number: Int!) {
+        repository(owner: $owner, name: $repo) {
+          nameWithOwner description
+          primaryLanguage { name }
+          repositoryTopics(first: 10) { nodes { topic { name } } }
+          item: ${CONTEXT_QUERIES[type]}
+        }
+      }`,
+      { owner: ref.owner, repo: ref.repo, number: ref.number },
+    ),
+    fetchAllComments(token, type, ref),
+  ]);
+  const repo = data.repository;
+  const raw = repo?.item;
+  if (!raw) return null;
+
+  const out: string[] = [];
+  const section = (title: string, lines: string[]) => lines.length && out.push(`## ${title}`, ...lines, "");
+  const linked = (nodes: ContextLinked[]) => nodes.map((n) => `- ${n.repository.nameWithOwner}#${n.number} (${n.state.toLowerCase()}): ${n.title}`);
+
+  section("Repository", [
+    `${repo.nameWithOwner}${repo.description ? `: ${repo.description}` : ""}`,
+    `Language: ${repo.primaryLanguage?.name ?? "unknown"}; topics: ${repo.repositoryTopics.nodes.map((n: { topic: { name: string } }) => n.topic.name).join(", ") || "none"}`,
+  ]);
+
+  const kind = { pr: "Pull request", issue: "Issue", discussion: "Discussion" }[type];
+  const state =
+    type === "discussion"
+      ? [raw.closed ? `closed${raw.stateReason ? ` (${raw.stateReason.toLowerCase()})` : ""}` : "open", raw.locked && "locked", raw.isAnswered && "answered"]
+      : type === "issue"
+        ? [raw.state.toLowerCase(), raw.stateReason && raw.state === "CLOSED" && `(${raw.stateReason.toLowerCase()})`]
+        : [raw.state.toLowerCase(), raw.isDraft && "draft", raw.reviewDecision && `review decision: ${raw.reviewDecision.toLowerCase()}`, raw.state === "OPEN" && `mergeable: ${raw.mergeable.toLowerCase()}`];
+  section(kind, [
+    `${repo.nameWithOwner}#${ref.number}: ${raw.title}`,
+    `URL: ${raw.url}`,
+    `Author: ${who(raw.author)}; opened ${day(raw.createdAt)}; last updated ${day(raw.updatedAt)}`,
+    `State: ${state.filter(Boolean).join(", ")}`,
+    `Labels: ${raw.labels.nodes.map((l: { name: string }) => l.name).join(", ") || "none"}`,
+    ...(type === "discussion" ? [`Category: ${raw.category.name}; upvotes: ${raw.upvoteCount}`] : []),
+    ...(raw.milestone ? [`Milestone: ${raw.milestone.title}`] : []),
+    ...(raw.assignees ? [`Assignees: ${logins(raw.assignees.nodes)}`] : []),
+    ...(raw.participants ? [`Participants: ${logins(raw.participants.nodes)}`] : []),
+  ]);
+  section("Description", [raw.body.trim() || "(empty)"]);
+
+  if (type === "pr") {
+    const requested = raw.reviewRequests.nodes.map((r: { requestedReviewer: { login?: string; name?: string } | null }) => r.requestedReviewer?.login ?? r.requestedReviewer?.name).filter(Boolean);
+    section("Branch and size", [
+      `${raw.headRefName} → ${raw.baseRefName}; ${raw.changedFiles} files changed, +${raw.additions} −${raw.deletions}`,
+      `Requested reviewers: ${requested.join(", ") || "none"}`,
+    ]);
+    section("Closes", linked(raw.closingIssuesReferences.nodes));
+    section(`Changed files${raw.changedFiles > 100 ? " (first 100)" : ""}`, raw.files.nodes.map((f: { path: string; additions: number; deletions: number }) => `- ${f.path} (+${f.additions} −${f.deletions})`));
+    section(
+      `Commits (${raw.commits.totalCount}${raw.commits.totalCount > 100 ? ", latest 100" : ""})`,
+      raw.commits.nodes.map((n: { commit: { messageHeadline: string; author: { name: string | null; user: { login: string } | null } | null } }) =>
+        `- ${n.commit.messageHeadline} (${n.commit.author?.user ? `@${n.commit.author.user.login}` : (n.commit.author?.name ?? "unknown")})`,
+      ),
+    );
+    const checks = ((raw.statusCheckRollup.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? []) as RawContext[]).map(
+      (ctx) => `- ${ctx.__typename === "CheckRun" ? ctx.name : ctx.context}: ${checkStatus(ctx)}`,
+    );
+    section("Checks on the latest commit", checks);
+    section(
+      "Reviews",
+      raw.reviews.nodes.map((r: { author: { login: string } | null; state: string; body: string; submittedAt: string | null }) =>
+        `- [${r.submittedAt ? day(r.submittedAt) : "pending"}] ${who(r.author)} ${r.state.toLowerCase()}${r.body.trim() ? `: ${r.body.trim()}` : ""}`,
+      ),
+    );
+    section(
+      "Review threads on code",
+      raw.reviewThreads.nodes.flatMap((t: { path: string; isResolved: boolean; comments: { nodes: ContextComment[] } }) => [
+        `- ${t.path} (${t.isResolved ? "resolved" : "unresolved"})`,
+        ...t.comments.nodes.map((c) => `  - [${day(c.createdAt)}] ${who(c.author)}: ${c.body.trim()}`),
+      ]),
+    );
+  }
+  if (type === "issue") section("Closed by pull requests", linked(raw.closedByPullRequestsReferences.nodes));
+  if (type === "discussion" && raw.answer) section("Accepted answer", [`${who(raw.answer.author)}: ${raw.answer.body.trim()}`]);
+
+  section(
+    `Conversation (${total} comments${comments.length < total ? `, first ${comments.length} shown` : ""})`,
+    comments.flatMap((c) => [
+      `- [${day(c.createdAt)}] ${who(c.author)}${c.isAnswer ? " (accepted answer)" : ""}: ${c.body.trim()}`,
+      ...(c.replies?.nodes ?? []).map((r) => `  - [${day(r.createdAt)}] ${who(r.author)}: ${r.body.trim()}`),
+    ]),
+  );
+  // Comments, reviews and commits are covered above; the timeline adds state changes and cross-references.
+  if (type !== "discussion") {
+    section(
+      "Other activity",
+      (raw.timelineItems.nodes as RawEvent[])
+        .map(timelineEvent)
+        .filter((e) => e !== null && !["commented", "reviewed", "committed"].includes(e.kind))
+        .map((e) => `- [${day(e!.createdAt)}] ${who(e!.actor)} ${e!.kind.replace(/_/g, " ")}${e!.detail ? `: ${e!.detail}` : ""}${e!.kind === "referenced" && e!.url ? ` (${e!.url})` : ""}`),
+    );
+  }
+  return { updatedAt: raw.updatedAt, text: out.join("\n") };
+}

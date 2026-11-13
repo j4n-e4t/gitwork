@@ -205,3 +205,17 @@ export type ItemDetails = {
 
 // The part of the board that comes from GitHub (and is cached); the rest is read from the database per request.
 export type GitHubWorkView = Pick<WorkView, "viewer" | "items" | "missing" | "truncated">;
+
+// An AI-written overview of an item, generated on request from its full context and cached.
+export type ItemSummary = {
+  tldr: string;
+  what: string;
+  who: string;
+  why: string;
+  related: string;
+  status: string;
+  model: string;
+  generatedAt: string;
+  // The item's updatedAt when the summary was written; a newer one on the board means it may be out of date.
+  itemUpdatedAt: string;
+};

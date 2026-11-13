@@ -1,4 +1,4 @@
-import type { HiddenItem, ItemType, Reason, Todo, WorkItem } from "./types.ts";
+import type { HiddenItem, ItemSummary, ItemType, Reason, Todo, WorkItem } from "./types.ts";
 
 export type ItemRef = { owner: string; repo: string; number: number };
 
@@ -71,6 +71,11 @@ export function initDb(durableStorage: DurableObjectStorage) {
       number INTEGER NOT NULL,
       reasons TEXT NOT NULL,
       PRIMARY KEY (login, key)
+    );
+    -- The latest AI summary per item, by lowercased "owner/repo#number"; data is an ItemSummary as JSON.
+    CREATE TABLE IF NOT EXISTS summaries (
+      key TEXT PRIMARY KEY,
+      data TEXT NOT NULL
     );
   `);
   // Databases from before author rules have a CHECK without 'author'. SQLite can't change a CHECK, so the table is
@@ -279,4 +284,15 @@ export function untrackItems(login: string, keys: string[]) {
   storage.transactionSync(() => {
     for (const key of keys) run("DELETE FROM tracked WHERE login = ? AND key = ?", login, key);
   });
+}
+
+const summaryKey = (ref: ItemRef) => `${ref.owner}/${ref.repo}#${ref.number}`.toLowerCase();
+
+export function getSummary(ref: ItemRef): ItemSummary | null {
+  const row = rows<{ data: string }>("SELECT data FROM summaries WHERE key = ?", summaryKey(ref))[0];
+  return row ? JSON.parse(row.data) : null;
+}
+
+export function saveSummary(ref: ItemRef, summary: ItemSummary) {
+  run("INSERT OR REPLACE INTO summaries (key, data) VALUES (?, ?)", summaryKey(ref), JSON.stringify(summary));
 }

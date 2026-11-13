@@ -9,7 +9,8 @@ There is one column per reason. A PR that matches several reasons appears in eac
 - **Automatic:** open PRs and issues you authored, are assigned to, or are mentioned in, open issues you commented on, plus PRs with a review request for you. Discussions you started or commented in, including closed ones so you can see how they ended (resolved, outdated, answered).
 - **Watching:** any PR, issue or discussion you bookmark, in any state.
 - **Checking off:** merged and closed items never disappear on their own. Items that involved you while open stay in their columns after they merge or close, with a "Check off" button; checked-off items are hidden (Settings → "Show checked-off items" brings them back) and return if reopened.
-- **Todos:** tasks with an optional deadline, optionally linked to an item on the board ("Add todo" in a card's menu). Grouped into Overdue, Today, Upcoming, No deadline and Done.
+- **Todos** (optional, turn on under Settings → Features): tasks with an optional deadline, optionally linked to an item on the board ("Add todo" in a card's menu). Grouped into Overdue, Today, Upcoming, No deadline and Done.
+- **AI summaries** (optional, turn on under Settings → Features): a Summary tab in the item preview that writes a short overview of the item (what, who, why, related items, status) from its description, conversation and metadata with Gemini, on request.
 
 Everything is fetched in one GitHub GraphQL request each time the page loads or you click Refresh, plus follow-up requests for any search with more than 50 results (up to 200 per search; a column count ending in "+" means GitHub has more). The account menu shows how much of your GitHub API rate limit is left.
 
@@ -32,6 +33,8 @@ Locally, put these in `.env` (copy `.env.example`); Wrangler loads it and it's g
 | `GITHUB_CLIENT_SECRET` | yes      |                      | From the OAuth app.                                                                       |
 | `ALLOWED_USERS`        | yes      |                      | Comma-separated GitHub logins allowed to sign in. Bookmarks and hidden items are shared. |
 | `APP_URL`              | no       | the request's origin | Public origin. Set to `https://gitwork.jslop.fun` in `wrangler.jsonc`; `.env` overrides it locally. |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | for AI summaries |  | Google AI Studio key for the optional AI summaries. The item's full text and metadata are sent to Google, so use a billed project (free-tier prompts may be used for training). |
+| `GEMINI_MODEL`         | no       | `gemini-3.5-flash-lite` | Gemini model id, set in `wrangler.jsonc`.                                         |
 
 The app requests the `repo` scope so it can read private repositories, plus `read:discussion` for discussion categories. Organizations with OAuth app access restrictions must approve the app before their private repos show up. Sessions last 30 days. Your GitHub token stays in the Durable Object's storage; the browser only gets an opaque HTTP-only session cookie.
 
@@ -54,6 +57,7 @@ bunx wrangler login
 bunx wrangler secret put GITHUB_CLIENT_ID
 bunx wrangler secret put GITHUB_CLIENT_SECRET
 bunx wrangler secret put ALLOWED_USERS
+bunx wrangler secret put GOOGLE_GENERATIVE_AI_API_KEY
 bun run deploy           # vite build && wrangler deploy
 ```
 

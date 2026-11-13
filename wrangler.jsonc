@@ -17,7 +17,9 @@
   // Only reachable through the custom domain, which Cloudflare Access protects; workers.dev and preview URLs would bypass it.
   "workers_dev": false,
   "preview_urls": false,
-  // Local dev overrides this from .env. Secrets (set with `wrangler secret put`): GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, ALLOWED_USERS.
-  "vars": { "APP_URL": "https://gitwork.jslop.fun" },
+  // Local dev overrides these from .env. Secrets (set with `wrangler secret put`): GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
+  // ALLOWED_USERS, and optionally GOOGLE_GENERATIVE_AI_API_KEY (AI summaries are unavailable without it). GEMINI_MODEL is
+  // the Gemini model the AI summary uses.
+  "vars": { "APP_URL": "https://gitwork.jslop.fun", "GEMINI_MODEL": "gemini-3.5-flash-lite" },
   "observability": { "enabled": true }
 }

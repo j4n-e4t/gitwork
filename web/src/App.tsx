@@ -100,6 +100,9 @@ type StoredBoard = { login: string; view: WorkView };
 const SHOW_CHECKED_OFF_STORAGE_KEY = "work-view:show-checked-off";
 const SHOW_HIDDEN_STORAGE_KEY = "work-view:show-hidden";
 const COLLAPSED_STORAGE_KEY = "work-view:collapsed";
+// Optional features toggled in Settings; both are off until turned on.
+const SUMMARY_FEATURE_STORAGE_KEY = "work-view:feature-summary";
+const TODOS_FEATURE_STORAGE_KEY = "work-view:feature-todos";
 
 function readStoredCollapsed(): string[] {
   try {
@@ -110,8 +113,9 @@ function readStoredCollapsed(): string[] {
   }
 }
 
-const readStoredMode = (): Mode =>
-  [...MODES, TODOS_MODE].find((m) => m.value === readStored(MODE_STORAGE_KEY))?.value ?? "pr";
+// The todos view only counts while that feature is on.
+const readStoredMode = (todosEnabled: boolean): Mode =>
+  [...MODES, ...(todosEnabled ? [TODOS_MODE] : [])].find((m) => m.value === readStored(MODE_STORAGE_KEY))?.value ?? "pr";
 
 // Settings is a hash route so the browser's back button returns to the board.
 const SETTINGS_HASH = "#settings";
@@ -274,7 +278,11 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(() => readStored(SHOW_HIDDEN_STORAGE_KEY) === "true");
-  const [mode, setMode] = useState<Mode>(readStoredMode);
+  const [summaryEnabled, setSummaryEnabled] = useState(() => readStored(SUMMARY_FEATURE_STORAGE_KEY) === "true");
+  // The saved choice is kept, but the feature only works while the server has a Gemini key.
+  const summaryOn = summaryEnabled && me.summaryAvailable === true;
+  const [todosEnabled, setTodosEnabled] = useState(() => readStored(TODOS_FEATURE_STORAGE_KEY) === "true");
+  const [mode, setMode] = useState<Mode>(() => readStoredMode(todosEnabled));
   const [showCheckedOff, setShowCheckedOff] = useState(() => readStored(SHOW_CHECKED_OFF_STORAGE_KEY) === "true");
   const settingsOpen = useSettingsRoute();
   // Collapsed column keys: a Reason for item columns, "todo:<bucket>" for todo columns.
@@ -422,6 +430,17 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
     writeStored(MODE_STORAGE_KEY, next);
   }
 
+  function changeSummaryEnabled(next: boolean) {
+    setSummaryEnabled(next);
+    writeStored(SUMMARY_FEATURE_STORAGE_KEY, String(next));
+  }
+
+  function changeTodosEnabled(next: boolean) {
+    setTodosEnabled(next);
+    writeStored(TODOS_FEATURE_STORAGE_KEY, String(next));
+    if (!next && mode === "todos") changeMode("pr");
+  }
+
   function changeShowCheckedOff(next: boolean) {
     setShowCheckedOff(next);
     writeStored(SHOW_CHECKED_OFF_STORAGE_KEY, String(next));
@@ -484,7 +503,7 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
         hidden={isHidden(previewCurrent, hidden)}
         onToggleWatching={() => toggleWatching(previewCurrent)}
         onHide={(item) => setHidden(item, true)}
-        onAddTodo={() => setTodoDraft(newTodo(linkOf(previewCurrent)))}
+        onAddTodo={todosEnabled ? () => setTodoDraft(newTodo(linkOf(previewCurrent))) : undefined}
         buttonSize="icon-sm"
       />
     </>
@@ -523,7 +542,11 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
               </span>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" className="-ml-2.5" aria-label="Show pull requests, issues, discussions or todos">
+                  <Button
+                    variant="ghost"
+                    className="-ml-2.5"
+                    aria-label={todosEnabled ? "Show pull requests, issues, discussions or todos" : "Show pull requests, issues or discussions"}
+                  >
                     <CurrentModeIcon /> {currentMode.label}
                     {view && <span className="text-muted-foreground">{countOfMode(mode)}</span>}
                     <ChevronsUpDown className="text-muted-foreground" />
@@ -537,11 +560,15 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
                         {view && <span className="ml-auto text-muted-foreground">{countOfMode(value)}</span>}
                       </DropdownMenuRadioItem>
                     ))}
-                    <DropdownMenuSeparator />
-                    <DropdownMenuRadioItem value={TODOS_MODE.value}>
-                      <TODOS_MODE.icon /> {TODOS_MODE.label}
-                      {view && <span className="ml-auto text-muted-foreground">{countOfMode("todos")}</span>}
-                    </DropdownMenuRadioItem>
+                    {todosEnabled && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuRadioItem value={TODOS_MODE.value}>
+                          <TODOS_MODE.icon /> {TODOS_MODE.label}
+                          {view && <span className="ml-auto text-muted-foreground">{countOfMode("todos")}</span>}
+                        </DropdownMenuRadioItem>
+                      </>
+                    )}
                   </DropdownMenuRadioGroup>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -581,6 +608,11 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
       {settingsOpen ? (
         <main className="min-h-0 flex-1 overflow-y-auto">
           <Settings
+            summaryEnabled={summaryOn}
+            summaryAvailable={me.summaryAvailable === true}
+            onSummaryEnabledChange={changeSummaryEnabled}
+            todosEnabled={todosEnabled}
+            onTodosEnabledChange={changeTodosEnabled}
             showHidden={showHidden}
             onShowHiddenChange={changeShowHidden}
             showCheckedOff={showCheckedOff}
@@ -716,8 +748,8 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
                             onToggleWatching={() => toggleWatching(item)}
                             onHide={(item) => setHidden(item, true)}
                             onOpen={() => setPreviewItem(item)}
-                            todos={openTodosFor(item)}
-                            onAddTodo={() => setTodoDraft(newTodo(linkOf(item)))}
+                            todos={todosEnabled ? openTodosFor(item) : []}
+                            onAddTodo={todosEnabled ? () => setTodoDraft(newTodo(linkOf(item))) : undefined}
                             linked={linkedItems.get(item.url) ?? []}
                             onOpenItem={setPreviewItem}
                             checkedOff={isCheckedOff(item)}
@@ -753,6 +785,8 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
       <ItemPreview
         item={previewItem}
         actions={previewActions}
+        summaryEnabled={summaryOn}
+        todosEnabled={todosEnabled}
         todoCount={previewTodos.length}
         boardItems={view?.items ?? []}
         onOpenItem={setPreviewItem}
