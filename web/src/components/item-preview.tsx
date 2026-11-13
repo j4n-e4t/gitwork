@@ -873,7 +873,9 @@ function GitHubHtml({ html, references: resolved }: { html: string; references: 
     <>
       <div
         ref={ref}
-        className="prose prose-sm prose-invert max-w-none [overflow-wrap:anywhere] prose-pre:overflow-x-auto prose-img:inline prose-img:my-0"
+        // Inline code is a muted chip like the mention and reference pills, instead of Typography's bold text in
+        // literal backticks; code blocks keep their own background.
+        className="prose prose-sm prose-invert max-w-none [overflow-wrap:anywhere] prose-pre:overflow-x-auto prose-img:inline prose-img:my-0 prose-code:rounded-md prose-code:bg-muted prose-code:px-1.5 prose-code:py-0.5 prose-code:font-normal prose-code:before:content-none prose-code:after:content-none [&_pre_code]:bg-transparent [&_pre_code]:p-0"
         dangerouslySetInnerHTML={{ __html: html }}
         // Clicking anywhere on a heading toggles it, except on links inside it or when selecting its text.
         onClick={(e) => {
