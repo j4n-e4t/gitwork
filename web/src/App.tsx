@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ArrowRight,
   ChevronsRightLeft,
+  ChevronsUpDown,
   EllipsisVertical,
   GripVertical,
   LogIn,
@@ -26,12 +27,13 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
@@ -229,12 +231,11 @@ function AccountMenu({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   return (
     <DropdownMenu onOpenChange={onOpenChange}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="gap-2 px-1.5" aria-label={`Account: ${me.login}`}>
+        <Button variant="ghost" size="icon" className="rounded-full" aria-label={`Account: ${me.login}`}>
           <Avatar size="sm">
             <AvatarImage src={me.avatarUrl} alt="" />
             <AvatarFallback>{me.login[0]?.toUpperCase()}</AvatarFallback>
           </Avatar>
-          <span className="hidden text-sm sm:inline">{me.login}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-auto min-w-40">
@@ -493,7 +494,10 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
   );
   const modeItems = visibleItems.filter((item) => item.type === mode);
   const linkedItems = linksBetween(visibleItems);
-  const countOf = (type: ItemType) => visibleItems.filter((item) => item.type === type).length;
+  const countOfMode = (m: Mode) =>
+    m === "todos" ? todos.filter((t) => !t.done).length : visibleItems.filter((item) => item.type === m).length;
+  const currentMode = [...MODES, TODOS_MODE].find((m) => m.value === mode) ?? MODES[0];
+  const CurrentModeIcon = currentMode.icon;
 
   return (
     <div className="flex h-dvh flex-col">
@@ -510,25 +514,37 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
         ) : (
           <>
             <div className="mr-auto flex items-center gap-3">
-              <h1 className="sr-only">gitwork</h1>
-              <ToggleGroup
-                type="single"
-                variant="outline"
-                value={mode}
-                onValueChange={(value) => value && changeMode(value as Mode)}
-                aria-label="Show pull requests, issues, discussions or todos"
-              >
-                {[...MODES, TODOS_MODE].map(({ value, label, icon: ModeIcon }) => (
-                  <ToggleGroupItem key={value} value={value}>
-                    <ModeIcon /> {label}
-                    {view && (
-                      <span className="text-muted-foreground">
-                        {value === "todos" ? todos.filter((t) => !t.done).length : countOf(value)}
-                      </span>
-                    )}
-                  </ToggleGroupItem>
-                ))}
-              </ToggleGroup>
+              <h1 className="flex items-center gap-2 text-base font-semibold">
+                <img src="/favicon.svg" alt="" className="size-6" />
+                gitwork
+              </h1>
+              <span className="text-muted-foreground" aria-hidden>
+                /
+              </span>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" className="-ml-2.5" aria-label="Show pull requests, issues, discussions or todos">
+                    <CurrentModeIcon /> {currentMode.label}
+                    {view && <span className="text-muted-foreground">{countOfMode(mode)}</span>}
+                    <ChevronsUpDown className="text-muted-foreground" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="w-auto min-w-48">
+                  <DropdownMenuRadioGroup value={mode} onValueChange={(value) => changeMode(value as Mode)}>
+                    {MODES.map(({ value, label, icon: ModeIcon }) => (
+                      <DropdownMenuRadioItem key={value} value={value}>
+                        <ModeIcon /> {label}
+                        {view && <span className="ml-auto text-muted-foreground">{countOfMode(value)}</span>}
+                      </DropdownMenuRadioItem>
+                    ))}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuRadioItem value={TODOS_MODE.value}>
+                      <TODOS_MODE.icon /> {TODOS_MODE.label}
+                      {view && <span className="ml-auto text-muted-foreground">{countOfMode("todos")}</span>}
+                    </DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
             {mode === "todos" ? (
               <Button onClick={() => setTodoDraft(newTodo())} disabled={!view}>
