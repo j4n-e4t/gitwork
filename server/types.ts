@@ -115,6 +115,33 @@ export type LinkedItem =
   | (LinkedBase & Pick<PullRequest, "type" | "state" | "isDraft">)
   | (LinkedBase & Pick<Issue, "type" | "state" | "stateReason">);
 
+// An issue, PR or discussion linked from a body or comment, for coloring the reference by its state and its hover card.
+export type ReferencedItem = (LinkedItem | (LinkedBase & Pick<Discussion, "type" | "closed" | "stateReason">)) & {
+  author: Person | null;
+  createdAt: string;
+  // The start of the body as plain text, cut to a preview length.
+  excerpt: string;
+};
+
+// A user or organization, for the hover card on @mentions. Fetched on demand.
+export type ProfileSummary = {
+  login: string;
+  name: string | null;
+  avatarUrl: string;
+  url: string;
+  // A user's bio or an organization's description.
+  bio: string | null;
+  location: string | null;
+  createdAt: string;
+};
+
+// "owner/repo#number" (lowercased) of a GitHub issue, PR or discussion URL, which is how ItemDetails.references
+// is keyed. GitHub's `data-url` on reference links always uses /issues/ for PRs.
+export function referenceKey(url: string): string | null {
+  const m = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull|discussions)\/(\d+)/.exec(url);
+  return m ? `${m[1]}/${m[2]}#${m[3]}`.toLowerCase() : null;
+}
+
 export type TimelineEvent = {
   kind:
     | "commented"
@@ -150,12 +177,19 @@ export type ItemDetails = {
   // Latest activity, newest first.
   timeline: TimelineEvent[];
   linked: LinkedItem[];
+  // Everyone involved: author, participants, assignees, reviewers, commenters and timeline actors, bots included.
+  involved: Person[];
+  // Issues, PRs and discussions referenced in the body and comments, by referenceKey. Missing ones (no access, or
+  // over the limit) are shown without a state.
+  references: Record<string, ReferencedItem>;
   pr: {
     baseRef: string;
     headRef: string;
     additions: number;
     deletions: number;
     changedFiles: number;
+    // The first 100 of changedFiles.
+    files: { path: string; additions: number; deletions: number }[];
     mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
     reviews: { author: Person | null; state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | "PENDING" }[];
     requestedReviewers: string[];

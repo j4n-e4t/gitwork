@@ -27,6 +27,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { ProfileHoverCard } from "@/components/user-link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -39,7 +40,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { deadlineLabel } from "@/components/todos";
-import { isClosed, itemKey, type HiddenItem, type LinkedItem, type PullRequest, type Todo, type WorkItem } from "@/lib/api";
+import { isClosed, itemKey, type HiddenItem, type LinkedItem, type PullRequest, type ReferencedItem, type Todo, type WorkItem } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export type ActionProps = {
@@ -77,7 +78,7 @@ export function relativeTime(iso: string) {
   return `${Math.round(minutes / 60 / 24)}d`;
 }
 
-export function stateIcon(item: WorkItem | LinkedItem): [LucideIcon, string, string] {
+export function stateIcon(item: WorkItem | LinkedItem | ReferencedItem): [LucideIcon, string, string] {
   if (item.type === "discussion") {
     if (item.closed) {
       if (item.stateReason === "RESOLVED") return [MessageSquareCheck, "text-violet-400", "Closed as resolved"];
@@ -225,17 +226,17 @@ export function ItemCard({ item, hidden, onToggleWatching, onHide, onOpen, todos
         {item.author && (
           // When the name doesn't fit beside the avatar it wraps onto a second line, which the fixed height clips,
           // leaving just the picture.
-          <span
-            className="flex h-4 min-w-4 flex-1 basis-0 flex-wrap items-center justify-end gap-x-1.5 overflow-hidden"
-            title={`${item.author} · updated ${new Date(item.updatedAt).toLocaleString()}`}
-          >
-            <Avatar className="size-4">
-              {/* Missing from boards cached before avatars were fetched; the initial shows until the next refresh. */}
-              {item.authorAvatarUrl && <AvatarImage src={item.authorAvatarUrl} alt="" />}
-              <AvatarFallback className="text-[0.5rem]">{item.author[0]?.toUpperCase()}</AvatarFallback>
-            </Avatar>
-            <ProfileLink login={item.author} url={item.authorUrl ?? `https://github.com/${item.author}`} className="leading-4 whitespace-nowrap" />
-          </span>
+          // UserLink can't drop just the name, so this keeps its own markup around the shared hover card.
+          <ProfileHoverCard user={{ login: item.author, avatarUrl: item.authorAvatarUrl ?? undefined, url: item.authorUrl }}>
+            <span className="flex h-4 min-w-4 flex-1 basis-0 flex-wrap items-center justify-end gap-x-1.5 overflow-hidden">
+              <Avatar className="size-4">
+                {/* Missing from boards cached before avatars were fetched; the initial shows until the next refresh. */}
+                {item.authorAvatarUrl && <AvatarImage src={item.authorAvatarUrl} alt="" />}
+                <AvatarFallback className="text-[0.5rem]">{item.author[0]?.toUpperCase()}</AvatarFallback>
+              </Avatar>
+              <ProfileLink login={item.author} url={item.authorUrl ?? `https://github.com/${item.author}`} className="leading-4 whitespace-nowrap" />
+            </span>
+          </ProfileHoverCard>
         )}
       </div>
       <CheckOffButton item={item} checkedOff={checkedOff} onCheckOff={onCheckOff} />

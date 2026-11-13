@@ -25,7 +25,7 @@ import {
   type Session,
 } from "./db.ts";
 import { currentSession, endSession, handleAuth } from "./auth.ts";
-import { fetchItemDetails, fetchItemsByRef, fetchRateLimit, fetchWorkView, GitHubAuthError } from "./github.ts";
+import { fetchItemDetails, fetchItemsByRef, fetchProfile, fetchRateLimit, fetchWorkView, GitHubAuthError } from "./github.ts";
 import { isClosed, REASONS, type HiddenItem, type ItemType, type Reason, type Todo, type GitHubWorkView } from "./types.ts";
 
 // Accepts "https://github.com/owner/repo/pull/123", ".../issues/123", ".../discussions/123" or "owner/repo#123".
@@ -186,6 +186,16 @@ export async function handleRequest(req: Request) {
     try {
       const details = await fetchItemDetails(session.token, type, ref);
       return details ? Response.json(details) : Response.json({ error: "Not found or no access" }, { status: 404 });
+    } catch (error) {
+      return githubFailure(error, session);
+    }
+  }
+  if (pathname === "/api/profile" && req.method === "GET") {
+    const login = new URL(req.url).searchParams.get("login");
+    if (!login || !/^[\w-]+(\[bot\])?$/.test(login)) return Response.json({ error: "Expected a login" }, { status: 400 });
+    try {
+      const profile = await fetchProfile(session.token, login);
+      return profile ? Response.json(profile) : Response.json({ error: "Not found" }, { status: 404 });
     } catch (error) {
       return githubFailure(error, session);
     }

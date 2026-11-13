@@ -3,6 +3,7 @@ import {
   type HiddenItem,
   type ItemDetails,
   type ItemType,
+  type ProfileSummary,
   type RateLimit,
   type Reason,
   type Todo,
@@ -10,8 +11,8 @@ import {
   type WorkView,
 } from "../../../server/types.ts";
 
-export { isClosed } from "../../../server/types.ts";
-export type { CheckStatus, Discussion, HiddenItem, Issue, ItemComment, ItemDetails, ItemType, LinkedItem, Person, MissingBookmark, PullRequest, RateLimit, Reason, TimelineEvent, Todo, TodoLink, WorkItem, WorkView } from "../../../server/types.ts";
+export { isClosed, referenceKey } from "../../../server/types.ts";
+export type { CheckStatus, Discussion, HiddenItem, Issue, ItemComment, ItemDetails, ItemType, LinkedItem, Person, MissingBookmark, ProfileSummary, PullRequest, RateLimit, Reason, ReferencedItem, TimelineEvent, Todo, TodoLink, WorkItem, WorkView } from "../../../server/types.ts";
 
 export type Me = { login: string; avatarUrl: string };
 
@@ -39,6 +40,7 @@ export const api = {
     const params = new URLSearchParams({ type: item.type, owner: item.owner, repo: item.repo, number: String(item.number) });
     return (await request(`/api/item?${params}`)).json();
   },
+  profile: async (login: string): Promise<ProfileSummary> => (await request(`/api/profile?${new URLSearchParams({ login })}`)).json(),
   logout: () => request("/auth/logout", { method: "POST" }),
   // Without `fresh` the server may answer from its cache (flagged `stale` when old).
   work: async (fresh = false): Promise<WorkView> => (await request(fresh ? "/api/work?fresh=1" : "/api/work")).json(),

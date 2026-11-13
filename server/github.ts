@@ -9,12 +9,15 @@ import type {
   ItemType,
   LinkedItem,
   Person,
+  ProfileSummary,
   PullRequest,
   RateLimit,
   Reason,
+  ReferencedItem,
   TimelineEvent,
   WorkItem,
 } from "./types.ts";
+import { referenceKey } from "./types.ts";
 
 /** GitHub rejected the token (revoked, app access removed, or granted before the app needed more scopes); the user must sign in again. */
 export class GitHubAuthError extends Error {}
@@ -269,6 +272,8 @@ const DETAIL_COMMON = `
   author { ${PERSON} } createdAt bodyHTML
   labels(first: 10) { nodes { name color } }
 `;
+// GitHub's participants are users only; bots are added from the loaded activity. Discussions have no such field.
+const PARTICIPANTS = `participants(first: 50) { nodes { ${PERSON} } }`;
 const LATEST_COMMENTS = `comments(last: 5) { totalCount nodes { ${COMMENT_FIELDS} } }`;
 
 // Issues and PRs share these timeline events; PRs add their own. Spreading a PR-only fragment into an issue's
@@ -307,7 +312,9 @@ const DETAIL_QUERIES: Record<ItemType, string> = {
     timelineItems(last: ${TIMELINE_LENGTH}, itemTypes: [${PR_EVENT_TYPES}]) { nodes { ${PR_EVENTS} } }
     closingIssuesReferences(first: 20) { nodes { ${LINKED_FIELDS} stateReason } }
     assignees(first: 10) { nodes { ${PERSON} } }
+    ${PARTICIPANTS}
     baseRefName headRefName additions deletions changedFiles mergeable
+    files(first: 100) { nodes { path additions deletions } }
     latestOpinionatedReviews(first: 20) { nodes { author { ${PERSON} } state } }
     reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } ... on Mannequin { login } } } }
     commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 50) { nodes {
@@ -322,6 +329,7 @@ const DETAIL_QUERIES: Record<ItemType, string> = {
     timelineItems(last: ${TIMELINE_LENGTH}, itemTypes: [${ISSUE_EVENT_TYPES}]) { nodes { ${ISSUE_EVENTS} } }
     closedByPullRequestsReferences(first: 20, includeClosedPrs: true) { nodes { ${LINKED_FIELDS} isDraft } }
     assignees(first: 10) { nodes { ${PERSON} } }
+    ${PARTICIPANTS}
   }`,
   discussion: `discussion(number: $number) {
     ${DETAIL_COMMON}
@@ -444,6 +452,62 @@ function discussionTimeline(comments: ItemComment[]): TimelineEvent[] {
   }));
 }
 
+const REFERENCE_LIMIT = 50;
+const EXCERPT_LENGTH = 200;
+
+function excerpt(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > EXCERPT_LENGTH ? `${flat.slice(0, EXCERPT_LENGTH).trimEnd()}…` : flat;
+}
+
+// Resolves the issue, PR and discussion links GitHub rendered into bodies (`<a class="issue-link" ...>`) in one query.
+async function fetchReferences(token: string, htmls: string[]): Promise<Record<string, ReferencedItem>> {
+  const refs = new Map<string, { owner: string; repo: string; number: number; discussion: boolean }>();
+  for (const html of htmls) {
+    for (const [tag] of html.matchAll(/<a [^>]*class="issue-link[^>]*>/g)) {
+      const url = /data-url="([^"]+)"/.exec(tag)?.[1];
+      const key = url && referenceKey(url);
+      if (!key || refs.has(key) || refs.size >= REFERENCE_LIMIT) continue;
+      const [, owner, repo, number] = /^(.+)\/(.+)#(\d+)$/.exec(key)!;
+      refs.set(key, { owner, repo, number: Number(number), discussion: /data-hovercard-type="discussion"/.test(tag) });
+    }
+  }
+  if (refs.size === 0) return {};
+  // Owner and repo are limited to [\w.-] by referenceKey, so they're safe to inline as string literals.
+  const fields = `number title url createdAt bodyText author { ${PERSON} } repository { name owner { login } }`;
+  const aliases = [...refs.values()].map(
+    (r, i) => `r${i}: repository(owner: "${r.owner}", name: "${r.repo}") {
+      ${r.discussion ? `item: discussion(number: ${r.number}) { __typename ${fields} closed stateReason }`
+        : `item: issueOrPullRequest(number: ${r.number}) {
+          __typename
+          ... on Issue { ${fields} state stateReason }
+          ... on PullRequest { ${fields} state isDraft }
+        }`}
+    }`,
+  );
+  const data = await graphql(token, `query { ${aliases.join("\n")} }`, {});
+  const references: Record<string, ReferencedItem> = {};
+  for (const repo of Object.values(data)) {
+    const raw = repo?.item;
+    if (!raw) continue;
+    const summary = { author: raw.author, createdAt: raw.createdAt, excerpt: excerpt(raw.bodyText) };
+    const item: ReferencedItem =
+      raw.__typename === "Discussion"
+        ? { owner: raw.repository.owner.login, repo: raw.repository.name, number: raw.number, title: raw.title, url: raw.url, type: "discussion", closed: raw.closed, stateReason: raw.stateReason, ...summary }
+        : { ...linkedItem(raw, raw.__typename === "PullRequest" ? "pr" : "issue"), ...summary };
+    references[`${item.owner}/${item.repo}#${item.number}`.toLowerCase()] = item;
+  }
+  return references;
+}
+
+// Everyone with a GitHub account who took part, in order of first appearance. Commit authors without an account
+// (no url) are left out.
+function involved(people: (Person | null)[]): Person[] {
+  const seen = new Map<string, Person>();
+  for (const p of people) if (p?.url && !seen.has(p.login.toLowerCase())) seen.set(p.login.toLowerCase(), p);
+  return [...seen.values()];
+}
+
 // Failures first so the reason a PR is red is visible without scrolling.
 const CHECK_ORDER: CheckStatus[] = ["failure", "pending", "success", "neutral", "skipped"];
 
@@ -465,12 +529,28 @@ export async function fetchItemDetails(token: string, type: ItemType, ref: ItemR
     replies: c.replies ? { total: c.replies.totalCount, latest: c.replies.nodes.map(comment) } : null,
   });
   const comments = (raw.comments.nodes as RawComment[]).map(comment);
+  const answer = type === "discussion" && raw.answer ? comment(raw.answer) : null;
+  const bodies = [raw.bodyHTML, ...[...comments, ...(answer ? [answer] : [])].flatMap((c) => [c.bodyHTML, ...(c.replies?.latest.map((r) => r.bodyHTML) ?? [])])];
+  // The details are still useful without reference states, so a failure here only costs the colors.
+  const references = await fetchReferences(token, bodies).catch((error) => {
+    if (error instanceof GitHubAuthError) throw error;
+    console.error("Resolving references failed", error);
+    return {};
+  });
   const timeline =
     type === "discussion"
       ? discussionTimeline(comments)
       : (raw.timelineItems.nodes as RawEvent[]).map(timelineEvent).filter((e) => e !== null);
   return {
     author: raw.author,
+    involved: involved([
+      raw.author,
+      ...(raw.participants?.nodes ?? []),
+      ...(raw.assignees?.nodes ?? []),
+      ...(raw.latestOpinionatedReviews?.nodes.map((r: { author: Person | null }) => r.author) ?? []),
+      ...[...comments, ...(answer ? [answer] : [])].flatMap((c) => [c.author, ...(c.replies?.latest.map((r) => r.author) ?? [])]),
+      ...timeline.map((e) => e.actor),
+    ]),
     createdAt: raw.createdAt,
     bodyHTML: raw.bodyHTML,
     labels: raw.labels?.nodes ?? [],
@@ -491,6 +571,7 @@ export async function fetchItemDetails(token: string, type: ItemType, ref: ItemR
             additions: raw.additions,
             deletions: raw.deletions,
             changedFiles: raw.changedFiles,
+            files: raw.files?.nodes ?? [],
             mergeable: raw.mergeable,
             reviews: raw.latestOpinionatedReviews.nodes,
             requestedReviewers: raw.reviewRequests.nodes
@@ -505,6 +586,30 @@ export async function fetchItemDetails(token: string, type: ItemType, ref: ItemR
               .sort((a, b) => CHECK_ORDER.indexOf(a.status) - CHECK_ORDER.indexOf(b.status)),
           }
         : null,
-    discussion: type === "discussion" ? { answer: raw.answer ? comment(raw.answer) : null } : null,
+    references,
+    discussion: type === "discussion" ? { answer } : null,
+  };
+}
+
+export async function fetchProfile(token: string, login: string): Promise<ProfileSummary | null> {
+  const data = await graphql(
+    token,
+    `query($login: String!) { repositoryOwner(login: $login) {
+      __typename login avatarUrl(size: 96) url
+      ... on User { name bio location createdAt }
+      ... on Organization { name description location createdAt }
+    } }`,
+    { login },
+  );
+  const raw = data.repositoryOwner;
+  if (!raw) return null;
+  return {
+    login: raw.login,
+    name: raw.name || null,
+    avatarUrl: raw.avatarUrl,
+    url: raw.url,
+    bio: raw.bio || raw.description || null,
+    location: raw.location || null,
+    createdAt: raw.createdAt,
   };
 }

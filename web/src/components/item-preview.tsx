@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   AlignLeft,
   ArrowUp,
@@ -18,6 +19,7 @@ import {
   Link2,
   ListTodo,
   MessageSquare,
+  MessagesSquare,
   Pencil,
   RefreshCw,
   SquareArrowOutUpRight,
@@ -28,10 +30,12 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { copyLink, ProfileLink, relativeTime, stateIcon } from "@/components/item-card";
+import { copyLink, relativeTime, stateIcon } from "@/components/item-card";
+import { UserLink, UserStack } from "@/components/user-link";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -43,7 +47,10 @@ import {
   type ItemDetails,
   itemKey,
   type LinkedItem,
+  sameItem,
   type Person,
+  referenceKey,
+  type ReferencedItem,
   type TimelineEvent,
   type WorkItem,
 } from "@/lib/api";
@@ -235,26 +242,29 @@ function PreviewHeader({
           </span>
           {details?.author && (
             <span className="flex items-center gap-1.5">
-              <PersonAvatar person={details.author} /> <ProfileLink login={details.author.login} url={details.author.url} /> opened {relativeTime(details.createdAt)} ago
+              <UserLink user={details.author} /> opened {relativeTime(details.createdAt)} ago
             </span>
           )}
         </div>
       </DialogDescription>
       {/* The active tab's underline sits on the header's bottom border. */}
-      <TabsList variant="line" className="mt-1">
-        <TabsTrigger value="description">
-          <AlignLeft /> Description
-        </TabsTrigger>
-        <TabsTrigger value="conversation">
-          <MessageSquare /> Conversation {details && <span className="text-xs text-muted-foreground">{details.comments.total}</span>}
-        </TabsTrigger>
-        <TabsTrigger value="linked">
-          <Link2 /> Linked {details && <span className="text-xs text-muted-foreground">{details.linked.length}</span>}
-        </TabsTrigger>
-        <TabsTrigger value="todos">
-          <ListTodo /> Todos <span className="text-xs text-muted-foreground">{todoCount}</span>
-        </TabsTrigger>
-      </TabsList>
+      <div className="mt-1 flex items-center gap-3">
+        <TabsList variant="line">
+          <TabsTrigger value="description">
+            <AlignLeft /> Description
+          </TabsTrigger>
+          <TabsTrigger value="conversation">
+            <MessageSquare /> Conversation {details && <span className="text-xs text-muted-foreground">{details.comments.total}</span>}
+          </TabsTrigger>
+          <TabsTrigger value="linked">
+            <Link2 /> Linked {details && <span className="text-xs text-muted-foreground">{details.linked.length}</span>}
+          </TabsTrigger>
+          <TabsTrigger value="todos">
+            <ListTodo /> Todos <span className="text-xs text-muted-foreground">{todoCount}</span>
+          </TabsTrigger>
+        </TabsList>
+        {details && details.involved.length > 0 && <UserStack users={details.involved} className="ml-auto hidden sm:flex" />}
+      </div>
     </div>
   );
 }
@@ -275,16 +285,16 @@ function PreviewBody({
 }) {
   const { total, latest } = details.comments;
   return (
-    <>
+    <BoardContext value={{ boardItems, onOpenItem }}>
       <TabsContent value="description">
-        {details.bodyHTML ? <GitHubHtml html={details.bodyHTML} /> : <p className="text-muted-foreground">No description.</p>}
+        {details.bodyHTML ? <GitHubHtml html={details.bodyHTML} references={details.references} /> : <p className="text-muted-foreground">No description.</p>}
       </TabsContent>
       <TabsContent value="conversation" className="space-y-6">
         {/* The answer is usually older than the latest comments; when it's shown in the thread it's marked there instead. */}
         {details.discussion?.answer &&
           !latest.some((c) => c.isAnswer || c.replies?.latest.some((r) => r.isAnswer)) && (
           <Section title="Answer">
-            <CommentView comment={details.discussion.answer} />
+            <CommentView comment={details.discussion.answer} references={details.references} />
           </Section>
         )}
         {total === 0 ? (
@@ -292,7 +302,7 @@ function PreviewBody({
         ) : (
           <div className="space-y-3">
             {latest.toReversed().map((comment) => (
-              <CommentView key={comment.url} comment={comment} />
+              <CommentView key={comment.url} comment={comment} references={details.references} />
             ))}
             {total > latest.length && (
               <a href={item.url} target="_blank" rel="noreferrer" className="inline-block text-muted-foreground hover:underline">
@@ -303,64 +313,69 @@ function PreviewBody({
         )}
       </TabsContent>
       <TabsContent value="linked">
-        <LinkedItems item={item} linked={details.linked} boardItems={boardItems} onOpenItem={onOpenItem} />
+        <LinkedItems item={item} linked={details.linked} />
       </TabsContent>
-    </>
+    </BoardContext>
   );
 }
 
-function LinkedItems({
-  item,
-  linked,
-  boardItems,
-  onOpenItem,
-}: {
-  item: WorkItem;
-  linked: LinkedItem[];
-  boardItems: WorkItem[];
-  onOpenItem: (item: WorkItem) => void;
-}) {
+// Lets links deep inside rendered bodies open board items in the preview.
+const BoardContext = createContext<{ boardItems: WorkItem[]; onOpenItem: (item: WorkItem) => void }>({ boardItems: [], onOpenItem: () => {} });
+
+// For a link to a GitHub item: the board item it points to, if any, and a click handler that opens that item in the
+// preview. Modified clicks and items not on the board go to GitHub.
+function useBoardLink(target: { owner: string; repo: string; number: number } | undefined) {
+  const { boardItems, onOpenItem } = useContext(BoardContext);
+  const onBoard = target && boardItems.find((i) => sameItem(i, target));
+  const onClick = (e: MouseEvent) => {
+    if (!onBoard || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    onOpenItem(onBoard);
+  };
+  return { onBoard, onClick };
+}
+
+function LinkedItems({ item, linked }: { item: WorkItem; linked: LinkedItem[] }) {
   if (linked.length === 0) {
     const none = { pr: "This PR doesn't close any issues.", issue: "No pull requests are linked to this issue.", discussion: "Discussions can't be linked to pull requests." };
     return <p className="text-muted-foreground">{none[item.type]}</p>;
   }
   return (
     <ul className="flex max-w-2xl flex-col gap-1.5">
-      {linked.map((link) => {
-        const onBoard = boardItems.find((i) => i.url === link.url);
-        const [StateIcon, stateClass, stateLabel] = stateIcon(onBoard ?? link);
-        const sameRepo = link.owner === item.owner && link.repo === item.repo;
-        return (
-          <li key={link.url}>
-            <a
-              href={link.url}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => {
-                // Items on the board open in the preview; modified clicks and other items go to GitHub.
-                if (!onBoard || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-                e.preventDefault();
-                onOpenItem(onBoard);
-              }}
-              className="flex min-w-0 items-center gap-2 rounded-md bg-muted/60 px-3 py-2 hover:bg-muted"
-            >
-              <StateIcon className={cn("size-4 shrink-0", stateClass)} aria-label={stateLabel} />
-              <span className="shrink-0 text-muted-foreground">{sameRepo ? `#${link.number}` : itemKey(link)}</span>
-              <span className="truncate">{link.title}</span>
-              {!onBoard && <SquareArrowOutUpRight className="ml-auto size-3.5 shrink-0 text-muted-foreground" aria-label="Opens on GitHub" />}
-            </a>
-          </li>
-        );
-      })}
+      {linked.map((link) => (
+        <LinkedItemRow key={link.url} item={item} link={link} />
+      ))}
     </ul>
+  );
+}
+
+function LinkedItemRow({ item, link }: { item: WorkItem; link: LinkedItem }) {
+  const { onBoard, onClick } = useBoardLink(link);
+  const [StateIcon, stateClass, stateLabel] = stateIcon(onBoard ?? link);
+  const sameRepo = link.owner === item.owner && link.repo === item.repo;
+  return (
+    <li>
+      <a
+        href={link.url}
+        target="_blank"
+        rel="noreferrer"
+        onClick={onClick}
+        className="flex min-w-0 items-center gap-2 rounded-md bg-muted/60 px-3 py-2 hover:bg-muted"
+      >
+        <StateIcon className={cn("size-4 shrink-0", stateClass)} aria-label={stateLabel} />
+        <span className="shrink-0 text-muted-foreground">{sameRepo ? `#${link.number}` : itemKey(link)}</span>
+        <span className="truncate">{link.title}</span>
+        {!onBoard && <SquareArrowOutUpRight className="ml-auto size-3.5 shrink-0 text-muted-foreground" aria-label="Opens on GitHub" />}
+      </a>
+    </li>
   );
 }
 
 function PreviewSidebar({ item, details, onShowComment }: { item: WorkItem; details: ItemDetails; onShowComment: (url: string) => void }) {
   return (
     <>
-      {/* Keyed so the reviews and checks collapse again for each item. */}
-      {details.pr && <PullRequestSummary key={item.url} pr={details.pr} />}
+      {/* Keyed so the rows collapse again for each item. */}
+      {details.pr && <PullRequestSummary key={item.url} url={item.url} pr={details.pr} />}
       {item.type === "discussion" && (
         <Section title="Discussion">
           <div className="flex flex-wrap items-center gap-2">
@@ -374,11 +389,13 @@ function PreviewSidebar({ item, details, onShowComment }: { item: WorkItem; deta
       {details.labels.length > 0 && (
         <Section title="Labels">
           <div className="flex flex-wrap gap-1.5">
-            {details.labels.map((label) => (
-              <Badge key={label.name} variant="outline" className="gap-1.5">
-                <span className="size-2 rounded-full" style={{ backgroundColor: `#${label.color}` }} />
+            {/* Shortest first, which tends to pack the wrapped rows tighter. */}
+            {details.labels.toSorted((a, b) => a.name.length - b.name.length).map((label) => (
+              // Styled like the issue and PR chips in descriptions.
+              <span key={label.name} className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 font-medium">
+                <Tag className="size-3.5 shrink-0" style={{ color: `#${label.color}` }} />
                 {label.name}
-              </Badge>
+              </span>
             ))}
           </div>
         </Section>
@@ -516,11 +533,7 @@ function Timeline({ item, details, onShowComment }: { item: WorkItem; details: I
                 </span>
                 <span className="pointer-events-none relative flex min-w-0 flex-1 items-baseline gap-1.5 pt-0.5">
                   <span className="min-w-0 truncate">
-                    {e.actor ? (
-                      <ProfileLink login={actor} url={e.actor.url} className="pointer-events-auto font-medium" />
-                    ) : (
-                      <span className="font-medium">{actor}</span>
-                    )}{" "}
+                    <UserLink user={e.actor} avatar={false} className="pointer-events-auto" />{" "}
                     <span className={cn("text-muted-foreground", color)}>{verb}</span>
                   </span>
                   <span className="ml-auto shrink-0 text-xs text-muted-foreground" title={new Date(e.createdAt).toLocaleString()}>
@@ -535,7 +548,7 @@ function Timeline({ item, details, onShowComment }: { item: WorkItem; details: I
               <TimelineIcon icon={CircleDot} actor={details.author} />
               <span className="flex min-w-0 flex-1 items-baseline gap-1.5 pt-0.5">
                 <span className="truncate">
-                  <ProfileLink login={details.author.login} url={details.author.url} className="font-medium" /> <span className="text-muted-foreground">opened</span>
+                  <UserLink user={details.author} avatar={false} /> <span className="text-muted-foreground">opened</span>
                 </span>
                 <span className="ml-auto shrink-0 text-xs text-muted-foreground">{relativeTime(details.createdAt)}</span>
               </span>
@@ -550,37 +563,18 @@ function Timeline({ item, details, onShowComment }: { item: WorkItem; details: I
   );
 }
 
-function PullRequestSummary({ pr }: { pr: NonNullable<ItemDetails["pr"]> }) {
+// One panel with a collapsible row each for the branch and its changes, reviews and checks.
+function PullRequestSummary({ url, pr }: { url: string; pr: NonNullable<ItemDetails["pr"]> }) {
   return (
-    <>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <span className="flex min-w-0 items-center gap-1.5 font-mono text-xs">
-          <GitBranch className="size-4 shrink-0 text-muted-foreground" />
-          <span className="truncate">{pr.headRef}</span>
-          <span className="text-muted-foreground">→</span>
-          <span className="truncate">{pr.baseRef}</span>
-        </span>
-        <span className="text-xs">
-          <span className="text-emerald-400">+{pr.additions}</span> <span className="text-red-400">−{pr.deletions}</span>{" "}
-          <span className="text-muted-foreground">
-            in {pr.changedFiles} {pr.changedFiles === 1 ? "file" : "files"}
-          </span>
-        </span>
-        {pr.mergeable === "CONFLICTING" && (
-          <Badge variant="outline" className="text-red-400">
-            Merge conflicts
-          </Badge>
-        )}
-      </div>
-      <div className="space-y-2">
-        <ReviewsSummary pr={pr} />
-        {pr.checks.length > 0 && <ChecksSummary checks={pr.checks} />}
-      </div>
-    </>
+    <div className="divide-y overflow-hidden rounded-lg border">
+      <ChangesSummary url={url} pr={pr} />
+      <ReviewsSummary pr={pr} />
+      {pr.checks.length > 0 && <ChecksSummary checks={pr.checks} />}
+    </div>
   );
 }
 
-// A one-line summary that expands to its list; without a list it's a plain row.
+// A one-line summary that expands to its list; without a list it's a plain row. Rows sit in PullRequestSummary's panel.
 function CollapsibleSummary({
   icon: Icon,
   iconColor,
@@ -590,7 +584,7 @@ function CollapsibleSummary({
 }: {
   icon: LucideIcon;
   iconColor: string;
-  title: string;
+  title: ReactNode;
   summary: ReactNode;
   children?: ReactNode;
 }) {
@@ -598,24 +592,71 @@ function CollapsibleSummary({
   const row = (
     <>
       <Icon className={cn("size-4 shrink-0", iconColor)} />
-      <span className="font-medium">{title}</span>
-      {summary}
+      <span className="min-w-0 flex-1 truncate font-medium">{title}</span>
+      <span className="flex shrink-0 items-center gap-2 text-xs">{summary}</span>
     </>
   );
-  if (!children) return <div className="flex items-center gap-2 rounded-lg border px-3 py-1.5">{row}</div>;
+  if (!children) return <div className="flex items-center gap-2 px-3 py-2">{row}</div>;
   return (
-    <div className="rounded-lg border">
+    <div>
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
-        className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left hover:bg-muted"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted"
       >
         {row}
-        <ChevronDown className={cn("ml-auto size-4 shrink-0 text-muted-foreground", expanded && "rotate-180")} />
+        <ChevronDown className={cn("size-4 shrink-0 text-muted-foreground", expanded && "rotate-180")} />
       </button>
-      {expanded && <ul className="max-h-56 space-y-1 overflow-y-auto border-t p-2">{children}</ul>}
+      {expanded && <ul className="max-h-56 space-y-1 overflow-y-auto border-t bg-muted/30 p-2">{children}</ul>}
     </div>
+  );
+}
+
+function ChangesSummary({ url, pr }: { url: string; pr: NonNullable<ItemDetails["pr"]> }) {
+  const conflicting = pr.mergeable === "CONFLICTING";
+  const more = pr.changedFiles - pr.files.length;
+  return (
+    <CollapsibleSummary
+      icon={conflicting ? TriangleAlert : GitBranch}
+      iconColor={conflicting ? "text-red-400" : "text-muted-foreground"}
+      title={
+        <span className="font-mono text-xs font-normal" title={`${pr.headRef} → ${pr.baseRef}`}>
+          {pr.headRef} <span className="text-muted-foreground">→</span> {pr.baseRef}
+        </span>
+      }
+      summary={
+        <>
+          <span className="text-emerald-400">+{pr.additions}</span>
+          <span className="text-red-400">−{pr.deletions}</span>
+        </>
+      }
+    >
+      {conflicting && <li className="px-1 py-0.5 text-red-400">This branch has merge conflicts</li>}
+      <li className="px-1 py-0.5 text-xs text-muted-foreground">
+        {pr.changedFiles} {pr.changedFiles === 1 ? "file" : "files"} changed
+      </li>
+      {pr.files.map((file) => {
+        const slash = file.path.lastIndexOf("/");
+        return (
+          <li key={file.path} className="flex items-center gap-2 px-1 py-0.5 text-xs" title={file.path}>
+            <span className="min-w-0 flex-1 truncate font-mono">
+              <span className="text-muted-foreground">{file.path.slice(0, slash + 1)}</span>
+              {file.path.slice(slash + 1)}
+            </span>
+            <span className="shrink-0 text-emerald-400">+{file.additions}</span>
+            <span className="shrink-0 text-red-400">−{file.deletions}</span>
+          </li>
+        );
+      })}
+      {more > 0 && (
+        <li>
+          <a href={`${url}/files`} target="_blank" rel="noreferrer" className="block rounded px-1 py-0.5 text-xs text-muted-foreground hover:bg-muted">
+            {more} more {more === 1 ? "file" : "files"} on GitHub
+          </a>
+        </li>
+      )}
+    </CollapsibleSummary>
   );
 }
 
@@ -630,7 +671,7 @@ function ReviewsSummary({ pr }: { pr: NonNullable<ItemDetails["pr"]> }) {
       : approved > 0
         ? [CircleCheck, "text-emerald-400"]
         : requested > 0
-          ? [CircleDot, "text-amber-400"]
+          ? [Eye, "text-amber-400"]
           : [CircleDashed, "text-muted-foreground"];
   const hasRows = pr.reviews.length + requested > 0;
   return (
@@ -656,15 +697,14 @@ function ReviewsSummary({ pr }: { pr: NonNullable<ItemDetails["pr"]> }) {
             const [label, color] = REVIEW_LABELS[review.state] ?? [review.state, "text-muted-foreground"];
             return (
               <li key={review.author?.login ?? i} className="flex items-center gap-2 px-1 py-0.5">
-                {review.author && <PersonAvatar person={review.author} />}
-                {review.author ? <ProfileLink login={review.author.login} url={review.author.url} className="truncate" /> : <span className="truncate">ghost</span>}
+                <UserLink user={review.author} className="min-w-0 truncate" />
                 <span className={cn("shrink-0 text-xs", color)}>{label}</span>
               </li>
             );
           })}
           {pr.requestedReviewers.map((name) => (
             <li key={`requested-${name}`} className="flex items-center gap-2 px-1 py-0.5 text-muted-foreground">
-              <CircleDot className="size-5 shrink-0 p-0.5 text-amber-400" />
+              <Eye className="size-4 shrink-0 text-amber-400" />
               <span className="truncate">{name}</span> <span className="shrink-0 text-xs">review requested</span>
             </li>
           ))}
@@ -719,13 +759,13 @@ function ChecksSummary({ checks }: { checks: NonNullable<ItemDetails["pr"]>["che
   );
 }
 
-function CommentView({ comment }: { comment: ItemComment }) {
+function CommentView({ comment, references }: { comment: ItemComment; references: ItemDetails["references"] }) {
   const replies = comment.replies;
   return (
     <div data-comment-url={comment.url} className={cn("scroll-mt-4 overflow-hidden rounded-lg border", comment.isAnswer && "border-emerald-400/40")}>
       <CommentHeader comment={comment} className="border-b px-3 py-2" />
       <div className="px-3 py-2">
-        <GitHubHtml html={comment.bodyHTML} />
+        <GitHubHtml html={comment.bodyHTML} references={references} />
       </div>
       {replies && replies.total > 0 && (
         <div className="space-y-3 border-t bg-muted/30 px-3 py-3">
@@ -737,7 +777,7 @@ function CommentView({ comment }: { comment: ItemComment }) {
           {replies.latest.map((reply) => (
             <div key={reply.url} data-comment-url={reply.url} className="scroll-mt-4 space-y-1 border-l-2 pl-3">
               <CommentHeader comment={reply} />
-              <GitHubHtml html={reply.bodyHTML} />
+              <GitHubHtml html={reply.bodyHTML} references={references} />
             </div>
           ))}
         </div>
@@ -749,12 +789,7 @@ function CommentView({ comment }: { comment: ItemComment }) {
 function CommentHeader({ comment, className }: { comment: ItemComment; className?: string }) {
   return (
     <div className={cn("flex items-center gap-2 text-xs text-muted-foreground", className)}>
-      {comment.author && <PersonAvatar person={comment.author} />}
-      {comment.author ? (
-        <ProfileLink login={comment.author.login} url={comment.author.url} className="font-medium text-foreground" />
-      ) : (
-        <span className="font-medium text-foreground">ghost</span>
-      )}
+      <UserLink user={comment.author} />
       <a href={comment.url} target="_blank" rel="noreferrer" className="hover:underline" title={new Date(comment.createdAt).toLocaleString()}>
         {relativeTime(comment.createdAt)} ago
       </a>
@@ -772,22 +807,175 @@ function CommentHeader({ comment, className }: { comment: ItemComment; className
   );
 }
 
+type Reference = { kind: "user" | "issue" | "pull_request" | "discussion"; text: string; href: string; key: string | null; slot: HTMLElement };
+
+const REFERENCE_ICONS: Record<Exclude<Reference["kind"], "user">, LucideIcon> = {
+  issue: CircleDot,
+  pull_request: GitPullRequest,
+  discussion: MessagesSquare,
+};
+
 // GitHub renders and sanitizes bodyHTML server-side, so it's safe to inject. Links open in a new tab so the
-// dialog (and the board behind it) stay put.
-function GitHubHtml({ html }: { html: string }) {
+// dialog (and the board behind it) stay put. Mentions and issue/PR/discussion links, which GitHub marks with
+// `user-mention` / `issue-link` and a hovercard type, are swapped for placeholders that React renders into, so
+// they get the app's own links and hover cards. The HTML carries no item state; the server resolves it into
+// `references`, and unresolved ones stay neutral without a card.
+function GitHubHtml({ html, references: resolved }: { html: string; references: ItemDetails["references"] }) {
   const ref = useRef<HTMLDivElement>(null);
+  const [references, setReferences] = useState<Reference[]>([]);
+  const [headings, setHeadings] = useState<Heading[]>([]);
+  const [collapsed, setCollapsed] = useState<ReadonlySet<Element>>(new Set());
   useEffect(() => {
-    for (const a of ref.current?.querySelectorAll("a[href]") ?? []) {
+    const root = ref.current;
+    if (!root) return;
+    for (const a of root.querySelectorAll<HTMLAnchorElement>("a[href]")) {
       a.setAttribute("target", "_blank");
       a.setAttribute("rel", "noreferrer");
+      const kind = a.classList.contains("user-mention") ? "user" : a.classList.contains("issue-link") ? a.dataset.hovercardType : undefined;
+      if (kind !== "user" && kind !== "issue" && kind !== "pull_request" && kind !== "discussion") continue;
+      const slot = document.createElement("span");
+      Object.assign(slot.dataset, { reference: kind, text: (a.textContent ?? "").replace(/^@/, ""), href: a.href, url: a.dataset.url ?? a.href });
+      a.replaceWith(slot);
     }
+    // Collected from the placeholders rather than the links, since StrictMode runs this twice on the same DOM.
+    setReferences(
+      [...root.querySelectorAll<HTMLElement>("span[data-reference]")].map((slot) => {
+        const kind = slot.dataset.reference as Reference["kind"];
+        return { kind, text: slot.dataset.text!, href: slot.dataset.href!, key: kind === "user" ? null : referenceKey(slot.dataset.url!), slot };
+      }),
+    );
+    setHeadings(findHeadings(root));
+    setCollapsed(new Set());
   }, [html]);
+
+  // A collapsed heading hides everything after it up to the next heading of the same or a higher level. Headings
+  // are only taken from the top level, where GitHub puts them, so a section is a run of sibling blocks.
+  useEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const byBlock = new Map(headings.map((h) => [h.block, h]));
+    const open: { level: number; collapsed: boolean }[] = [];
+    for (const child of root.children) {
+      const heading = byBlock.get(child);
+      if (heading) while (open.length > 0 && open.at(-1)!.level >= heading.level) open.pop();
+      (child as HTMLElement).hidden = open.some((h) => h.collapsed);
+      if (heading) open.push({ level: heading.level, collapsed: collapsed.has(child) });
+    }
+  }, [headings, collapsed]);
+
+  const toggle = (block: Element) =>
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (!next.delete(block)) next.add(block);
+      return next;
+    });
   return (
-    <div
-      ref={ref}
-      className="prose prose-sm prose-invert max-w-none [overflow-wrap:anywhere] prose-pre:overflow-x-auto prose-img:inline prose-img:my-0"
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <>
+      <div
+        ref={ref}
+        className="prose prose-sm prose-invert max-w-none [overflow-wrap:anywhere] prose-pre:overflow-x-auto prose-img:inline prose-img:my-0"
+        dangerouslySetInnerHTML={{ __html: html }}
+        // Clicking anywhere on a heading toggles it, except on links inside it or when selecting its text.
+        onClick={(e) => {
+          const target = e.target as Element;
+          const heading = headings.find((h) => h.block.contains(target));
+          if (heading && !target.closest("a") && !window.getSelection()?.toString()) toggle(heading.block);
+        }}
+      />
+      {references.map((reference, i) => createPortal(<ReferenceChip reference={reference} resolved={resolved} />, reference.slot, i))}
+      {headings.map((heading, i) =>
+        createPortal(
+          <button
+            type="button"
+            aria-expanded={!collapsed.has(heading.block)}
+            aria-label={collapsed.has(heading.block) ? "Expand section" : "Collapse section"}
+            onClick={() => toggle(heading.block)}
+            className={cn(
+              "not-prose ml-1.5 inline-flex size-5 items-center justify-center rounded align-middle text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:opacity-100",
+              !collapsed.has(heading.block) && "opacity-0 group-hover/heading:opacity-100",
+            )}
+          >
+            <ChevronDown className={cn("size-4", collapsed.has(heading.block) && "-rotate-90")} />
+          </button>,
+          heading.slot,
+          `heading-${i}`,
+        ),
+      )}
+    </>
+  );
+}
+
+type Heading = { level: number; block: Element; slot: HTMLElement };
+
+// Top-level headings, either bare or in GitHub's newer `<div class="markdown-heading">` wrapper, each given a slot
+// at its end for the collapse toggle. Idempotent, since StrictMode runs the effect twice on the same DOM.
+function findHeadings(root: Element): Heading[] {
+  const headings: Heading[] = [];
+  for (const block of root.children) {
+    const h = block.matches("h1, h2, h3, h4, h5, h6") ? block : block.matches(".markdown-heading") ? block.querySelector("h1, h2, h3, h4, h5, h6") : null;
+    if (!h) continue;
+    let slot = h.querySelector<HTMLElement>(":scope > [data-heading-toggle]");
+    if (!slot) {
+      slot = document.createElement("span");
+      slot.dataset.headingToggle = "";
+      h.append(slot);
+      h.classList.add("group/heading", "cursor-pointer");
+    }
+    headings.push({ level: Number(h.tagName[1]), block, slot });
+  }
+  return headings;
+}
+
+function ReferenceChip({ reference: { kind, text, href, key }, resolved }: { reference: Reference; resolved: ItemDetails["references"] }) {
+  if (kind === "user") return <UserLink user={{ login: text, url: href }} pill className="not-prose" />;
+  const item = key ? resolved[key] : undefined;
+  const { onClick } = useBoardLink(item);
+  const [Icon, color, label] = item ? stateIcon(item) : [REFERENCE_ICONS[kind], "text-muted-foreground", undefined];
+  const chip = (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      onClick={onClick}
+      className="not-prose inline-flex items-center gap-1 rounded-md bg-muted px-1.5 align-middle font-medium text-foreground hover:bg-accent"
+    >
+      <Icon className={cn("size-3.5 shrink-0", color)} aria-label={label} />
+      {text}
+    </a>
+  );
+  if (!item) return chip;
+  return (
+    <HoverCard openDelay={300} closeDelay={100}>
+      <HoverCardTrigger asChild>{chip}</HoverCardTrigger>
+      <HoverCardContent align="start" className="w-80">
+        <ReferenceCard item={item} />
+      </HoverCardContent>
+    </HoverCard>
+  );
+}
+
+function ReferenceCard({ item }: { item: ReferencedItem }) {
+  const [Icon, color, label] = stateIcon(item);
+  const { onBoard, onClick } = useBoardLink(item);
+  return (
+    <div className="space-y-2">
+      <div className="truncate text-xs text-muted-foreground">
+        {item.owner}/{item.repo} · opened {relativeTime(item.createdAt)} ago
+      </div>
+      <div className="flex gap-2">
+        <Icon className={cn("mt-0.5 size-4 shrink-0", color)} aria-label={label} />
+        <a href={item.url} target="_blank" rel="noreferrer" onClick={onClick} className="font-medium hover:underline">
+          {item.title} <span className="font-normal text-muted-foreground">#{item.number}</span>
+          {!onBoard && <SquareArrowOutUpRight className="ml-1 inline size-3 align-baseline text-muted-foreground" aria-label="Opens on GitHub" />}
+        </a>
+      </div>
+      {item.excerpt && <p className="line-clamp-3 text-muted-foreground">{item.excerpt}</p>}
+      {item.author && (
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <UserLink user={item.author} /> · {label}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -800,22 +988,11 @@ function Section({ title, className, children }: { title: string; className?: st
   );
 }
 
-function PersonAvatar({ person }: { person: Person }) {
-  return (
-    <Avatar className="size-5">
-      <AvatarImage src={person.avatarUrl} alt="" />
-      <AvatarFallback>{person.login[0]?.toUpperCase()}</AvatarFallback>
-    </Avatar>
-  );
-}
-
 function PeopleList({ people }: { people: Person[] }) {
   return (
     <div className="flex flex-wrap gap-3">
       {people.map((p) => (
-        <span key={p.login} className="flex items-center gap-1.5">
-          <PersonAvatar person={p} /> <ProfileLink login={p.login} url={p.url} />
-        </span>
+        <UserLink key={p.login} user={p} />
       ))}
     </div>
   );
