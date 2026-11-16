@@ -1,4 +1,4 @@
-import type { HiddenItem, ItemSummary, ItemType, Reason, Todo, WorkItem } from "./types.ts";
+import type { HiddenItem, ItemSummary, ItemType, Reason, WorkItem } from "./types.ts";
 
 export type ItemRef = { owner: string; repo: string; number: number };
 
@@ -43,18 +43,6 @@ export function initDb(durableStorage: DurableObjectStorage) {
       login TEXT PRIMARY KEY,
       data TEXT NOT NULL,
       fetched_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS todos (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      deadline TEXT,
-      done INTEGER NOT NULL DEFAULT 0,
-      link_type TEXT,
-      link_owner TEXT,
-      link_repo TEXT,
-      link_number INTEGER,
-      link_title TEXT,
-      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     );
     -- Closed or merged items the user checked off, by "owner/repo#number".
     CREATE TABLE IF NOT EXISTS dismissed (
@@ -185,62 +173,6 @@ export function setCachedWork(login: string, data: unknown) {
 // Bookmarks are shared by all users, so a change invalidates everyone's cached board.
 export function clearCachedWork() {
   run("DELETE FROM work_cache");
-}
-
-type TodoRow = {
-  id: string;
-  title: string;
-  deadline: string | null;
-  done: number;
-  link_type: string | null;
-  link_owner: string | null;
-  link_repo: string | null;
-  link_number: number | null;
-  link_title: string | null;
-  created_at: string;
-};
-
-export function listTodos(): Todo[] {
-  return rows<TodoRow>("SELECT * FROM todos ORDER BY created_at").map((row) => ({
-    id: row.id,
-    title: row.title,
-    deadline: row.deadline,
-    done: row.done === 1,
-    link: row.link_type
-      ? {
-          type: row.link_type as ItemType,
-          owner: row.link_owner!,
-          repo: row.link_repo!,
-          number: row.link_number!,
-          title: row.link_title!,
-        }
-      : null,
-    createdAt: row.created_at,
-  }));
-}
-
-// Inserts or fully replaces a todo; the client always sends the whole todo, which keeps edits idempotent.
-export function saveTodo(todo: Omit<Todo, "createdAt">) {
-  run(
-    `INSERT INTO todos (id, title, deadline, done, link_type, link_owner, link_repo, link_number, link_title)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (id) DO UPDATE SET title = excluded.title, deadline = excluded.deadline, done = excluded.done,
-       link_type = excluded.link_type, link_owner = excluded.link_owner, link_repo = excluded.link_repo,
-       link_number = excluded.link_number, link_title = excluded.link_title`,
-    todo.id,
-    todo.title,
-    todo.deadline,
-    todo.done ? 1 : 0,
-    todo.link?.type ?? null,
-    todo.link?.owner ?? null,
-    todo.link?.repo ?? null,
-    todo.link?.number ?? null,
-    todo.link?.title ?? null,
-  );
-}
-
-export function deleteTodo(id: string) {
-  run("DELETE FROM todos WHERE id = ?", id);
 }
 
 export function listDismissed(): string[] {

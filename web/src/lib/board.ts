@@ -4,7 +4,6 @@ import {
   Eye,
   GitPullRequest,
   GitPullRequestArrow,
-  ListTodo,
   MessageSquareReply,
   MessagesSquare,
   Star,
@@ -22,10 +21,8 @@ export const COLUMNS: Record<Reason, { title: string; icon: LucideIcon }> = {
   watching: { title: "Watching", icon: Star },
 };
 
-// The board shows one item type at a time, or the todo list.
-export type Mode = ItemType | "todos";
-
-export const TODOS_MODE = { value: "todos" as const, label: "Todos", icon: ListTodo };
+// The board shows one item type at a time.
+export type Mode = ItemType;
 
 export const MODES: { value: ItemType; label: string; icon: LucideIcon }[] = [
   { value: "pr", label: "Pull requests", icon: GitPullRequest },

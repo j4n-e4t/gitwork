@@ -1,7 +1,13 @@
 import type { ItemRef } from "./db.ts";
 import type {
   CheckStatus,
+  CommentPage,
+  Commit,
+  CommitList,
+  Diff,
+  DiffFile,
   Discussion,
+  EarlierComments,
   GitHubWorkView,
   Issue,
   ItemComment,
@@ -17,7 +23,7 @@ import type {
   TimelineEvent,
   WorkItem,
 } from "./types.ts";
-import { referenceKey } from "./types.ts";
+import { referenceKey, referenceLinkKind } from "./types.ts";
 
 /** GitHub rejected the token (revoked, app access removed, or granted before the app needed more scopes); the user must sign in again. */
 export class GitHubAuthError extends Error {}
@@ -267,37 +273,75 @@ export async function fetchRateLimit(token: string): Promise<RateLimit> {
 }
 
 const PERSON = "login avatarUrl(size: 64) url";
-const COMMENT_FIELDS = `author { ${PERSON} } bodyHTML createdAt url`;
+const COMMENT_FIELDS = `id author { ${PERSON} } bodyHTML createdAt url`;
 const DETAIL_COMMON = `
   author { ${PERSON} } createdAt bodyHTML
   labels(first: 10) { nodes { name color } }
 `;
 // GitHub's participants are users only; bots are added from the loaded activity. Discussions have no such field.
 const PARTICIPANTS = `participants(first: 50) { nodes { ${PERSON} } }`;
-const LATEST_COMMENTS = `comments(last: 5) { totalCount nodes { ${COMMENT_FIELDS} } }`;
+// The latest comments come with the details; earlier ones are loaded a page at a time (fetchEarlierComments).
+// Discussions take fewer per page since each comment brings its latest replies.
+const COMMENT_PAGE = 50;
+const DISCUSSION_COMMENT_PAGE = 20;
+const REPLY_PAGE = 20;
+const PAGE_INFO = "totalCount pageInfo { hasPreviousPage startCursor }";
+const DISCUSSION_COMMENT_FIELDS = `
+  ${COMMENT_FIELDS} isAnswer upvoteCount
+  replies(last: ${REPLY_PAGE}) { ${PAGE_INFO} nodes { ${COMMENT_FIELDS} isAnswer } }
+`;
+const LATEST_COMMENTS = `comments(last: ${COMMENT_PAGE}) { ${PAGE_INFO} nodes { ${COMMENT_FIELDS} } }`;
+// A PR's conversation is its comments and reviews together, in order, which only the timeline has. Each review
+// brings its latest inline comments; filteredCount counts just these two kinds.
+const REVIEW_COMMENT_PAGE = 10;
+const REVIEW_COMMENT_FIELDS = `${COMMENT_FIELDS} path line originalLine diffHunk`;
+const prConversation = (paged: boolean) => `comments: timelineItems(
+  last: ${COMMENT_PAGE}${paged ? ", before: $before" : ""}, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW]
+) {
+  totalCount: filteredCount pageInfo { hasPreviousPage startCursor }
+  nodes {
+    __typename
+    ... on IssueComment { ${COMMENT_FIELDS} }
+    ... on PullRequestReview {
+      ${COMMENT_FIELDS} state
+      replies: comments(last: ${REVIEW_COMMENT_PAGE}) { ${PAGE_INFO} nodes { ${REVIEW_COMMENT_FIELDS} } }
+    }
+  }
+}`;
 
 // Issues and PRs share these timeline events; PRs add their own. Spreading a PR-only fragment into an issue's
 // timeline is a GraphQL validation error, so the two lists are kept apart.
 const ACTOR = `actor { ${PERSON} } createdAt`;
+const SOURCE_FIELDS = "__typename number title url state repository { name owner { login } }";
 const ISSUE_EVENTS = `
   __typename
-  ... on IssueComment { author { ${PERSON} } createdAt url }
+  ... on IssueComment { author { ${PERSON} } createdAt url bodyText }
   ... on ClosedEvent { ${ACTOR} url stateReason }
   ... on ReopenedEvent { ${ACTOR} }
-  ... on LabeledEvent { ${ACTOR} label { name } }
-  ... on UnlabeledEvent { ${ACTOR} label { name } }
-  ... on AssignedEvent { ${ACTOR} assignee { ... on User { login } ... on Bot { login } } }
-  ... on RenamedTitleEvent { ${ACTOR} currentTitle }
-  ... on CrossReferencedEvent { ${ACTOR} source { ... on Issue { title url } ... on PullRequest { title url } } }
+  ... on LabeledEvent { ${ACTOR} label { name color } }
+  ... on UnlabeledEvent { ${ACTOR} label { name color } }
+  ... on AssignedEvent { ${ACTOR} assignee { ... on Actor { ${PERSON} } } }
+  ... on RenamedTitleEvent { ${ACTOR} previousTitle currentTitle }
+  ... on CrossReferencedEvent {
+    ${ACTOR}
+    source { ... on Issue { ${SOURCE_FIELDS} stateReason } ... on PullRequest { ${SOURCE_FIELDS} isDraft } }
+  }
 `;
 const ISSUE_EVENT_TYPES = "ISSUE_COMMENT, CLOSED_EVENT, REOPENED_EVENT, LABELED_EVENT, UNLABELED_EVENT, ASSIGNED_EVENT, RENAMED_TITLE_EVENT, CROSS_REFERENCED_EVENT";
 const PR_EVENTS = `
   ${ISSUE_EVENTS}
-  ... on PullRequestReview { author { ${PERSON} } createdAt url state }
-  ... on PullRequestCommit { url commit { committedDate author { name user { ${PERSON} } } } }
-  ... on MergedEvent { ${ACTOR} url }
-  ... on HeadRefForcePushedEvent { ${ACTOR} }
-  ... on ReviewRequestedEvent { ${ACTOR} requestedReviewer { ... on User { login } ... on Team { name } ... on Mannequin { login } } }
+  ... on PullRequestReview { author { ${PERSON} } createdAt url state bodyText }
+  ... on PullRequestCommit {
+    url
+    commit {
+      oid message messageHeadline committedDate additions deletions changedFilesIfAvailable
+      statusCheckRollup { state }
+      author { name user { ${PERSON} } }
+    }
+  }
+  ... on MergedEvent { ${ACTOR} url mergeRefName commit { oid } }
+  ... on HeadRefForcePushedEvent { ${ACTOR} beforeCommit { oid } afterCommit { oid } }
+  ... on ReviewRequestedEvent { ${ACTOR} requestedReviewer { ... on Actor { ${PERSON} } ... on Team { name } } }
   ... on ReadyForReviewEvent { ${ACTOR} url }
   ... on ConvertToDraftEvent { ${ACTOR} url }
 `;
@@ -308,12 +352,13 @@ const LINKED_FIELDS = "number title url state repository { name owner { login } 
 const DETAIL_QUERIES: Record<ItemType, string> = {
   pr: `pullRequest(number: $number) {
     ${DETAIL_COMMON}
-    ${LATEST_COMMENTS}
+    ${prConversation(false)}
     timelineItems(last: ${TIMELINE_LENGTH}, itemTypes: [${PR_EVENT_TYPES}]) { nodes { ${PR_EVENTS} } }
     closingIssuesReferences(first: 20) { nodes { ${LINKED_FIELDS} stateReason } }
     assignees(first: 10) { nodes { ${PERSON} } }
     ${PARTICIPANTS}
     baseRefName headRefName additions deletions changedFiles mergeable
+    commitCount: commits { totalCount }
     files(first: 100) { nodes { path additions deletions } }
     latestOpinionatedReviews(first: 20) { nodes { author { ${PERSON} } state } }
     reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } ... on Mannequin { login } } } }
@@ -333,23 +378,69 @@ const DETAIL_QUERIES: Record<ItemType, string> = {
   }`,
   discussion: `discussion(number: $number) {
     ${DETAIL_COMMON}
-    comments(last: 5) { totalCount nodes {
-      ${COMMENT_FIELDS} isAnswer upvoteCount
-      replies(last: 3) { totalCount nodes { ${COMMENT_FIELDS} isAnswer } }
-    } }
+    comments(last: ${DISCUSSION_COMMENT_PAGE}) { ${PAGE_INFO} nodes { ${DISCUSSION_COMMENT_FIELDS} } }
     answer { ${COMMENT_FIELDS} isAnswer upvoteCount }
   }`,
 };
 
+type RawCommentPage = { totalCount: number; pageInfo: { hasPreviousPage: boolean; startCursor: string | null }; nodes: RawComment[] };
 type RawComment = {
+  __typename?: string;
+  id: string;
   author: Person | null;
   bodyHTML: string;
   createdAt: string;
   url: string;
   isAnswer?: boolean;
   upvoteCount?: number;
-  replies?: { totalCount: number; nodes: RawComment[] };
+  replies?: RawCommentPage;
+  state?: NonNullable<ItemComment["review"]> | "PENDING";
+  path?: string;
+  line?: number | null;
+  originalLine?: number | null;
+  diffHunk?: string;
 };
+
+function toComment(c: RawComment): ItemComment {
+  return {
+    id: c.id,
+    author: c.author,
+    bodyHTML: c.bodyHTML,
+    createdAt: c.createdAt,
+    url: c.url,
+    isAnswer: c.isAnswer ?? false,
+    upvotes: c.upvoteCount ?? null,
+    replies: c.replies ? toCommentPage(c.replies) : null,
+    review: c.__typename === "PullRequestReview" && c.state !== "PENDING" ? (c.state ?? null) : null,
+    // Outdated comments have no current line, only the one they were made on.
+    code: c.path ? { path: c.path, line: c.line ?? c.originalLine ?? null, diffHunk: c.diffHunk ?? "" } : null,
+  };
+}
+
+// Left out of a PR's conversation: the viewer's own unsubmitted review, and reviews with neither text nor inline
+// comments (GitHub creates those for a reply in a code thread, whose comment shows under its own review).
+const shown = (c: RawComment) =>
+  c.__typename !== "PullRequestReview" || (c.state !== "PENDING" && (c.state !== "COMMENTED" || c.bodyHTML !== "" || (c.replies?.totalCount ?? 0) > 0));
+
+function toCommentPage(page: RawCommentPage): CommentPage {
+  return {
+    total: page.totalCount,
+    latest: page.nodes.filter(shown).map(toComment),
+    before: page.pageInfo.hasPreviousPage ? page.pageInfo.startCursor : null,
+  };
+}
+
+// Bodies of comments and their replies, for resolving the references in them.
+const commentBodies = (comments: ItemComment[]) => comments.flatMap((c) => [c.bodyHTML, ...(c.replies?.latest.map((r) => r.bodyHTML) ?? [])]);
+
+// The details are still useful without reference states, so a failure here only costs the colors.
+function resolveReferences(token: string, bodies: string[]) {
+  return fetchReferences(token, bodies).catch((error): Record<string, ReferencedItem> => {
+    if (error instanceof GitHubAuthError) throw error;
+    console.error("Resolving references failed", error);
+    return {};
+  });
+}
 type RawContext =
   | { __typename: "CheckRun"; name: string; status: string; conclusion: string | null; detailsUrl: string | null }
   | { __typename: "StatusContext"; context: string; state: string; targetUrl: string | null };
@@ -376,12 +467,28 @@ type RawEvent = {
   url?: string;
   stateReason?: string | null;
   state?: string;
-  label?: { name: string };
-  assignee?: { login?: string } | null;
-  requestedReviewer?: { login?: string; name?: string } | null;
+  label?: { name: string; color: string };
+  assignee?: Person | null;
+  requestedReviewer?: (Partial<Person> & { name?: string }) | null;
+  previousTitle?: string;
   currentTitle?: string;
-  source?: { title?: string; url?: string };
-  commit?: { committedDate: string; author: { name: string | null; user: Person | null } | null };
+  bodyText?: string;
+  // Empty when the referencing item is neither an issue nor a PR (or not visible).
+  source?: (RawLinked & { __typename: "Issue" | "PullRequest" }) | { __typename?: undefined };
+  mergeRefName?: string;
+  beforeCommit?: { oid: string } | null;
+  afterCommit?: { oid: string } | null;
+  commit?: {
+    oid: string;
+    message?: string;
+    messageHeadline?: string;
+    committedDate?: string;
+    additions?: number;
+    deletions?: number;
+    changedFilesIfAvailable?: number | null;
+    statusCheckRollup?: { state: NonNullable<PullRequest["checks"]> } | null;
+    author?: { name: string | null; user: Person | null } | null;
+  } | null;
 };
 
 const EVENT_KINDS: Record<string, TimelineEvent["kind"]> = {
@@ -405,23 +512,51 @@ const EVENT_KINDS: Record<string, TimelineEvent["kind"]> = {
 function timelineEvent(e: RawEvent): TimelineEvent | null {
   const kind = EVENT_KINDS[e.__typename];
   if (!kind) return null;
-  if (e.commit) {
-    const author = e.commit.author;
+  if (kind === "committed" && e.commit) {
+    const c = e.commit;
     // Commits whose email isn't linked to a GitHub account only have a git name.
-    const actor = author?.user ?? (author?.name ? { login: author.name, avatarUrl: "", url: null } : null);
-    return { kind, actor, createdAt: e.commit.committedDate, detail: null, url: e.url ?? null };
+    const actor = c.author?.user ?? (c.author?.name ? { login: c.author.name, avatarUrl: "", url: null } : null);
+    return {
+      kind,
+      actor,
+      createdAt: c.committedDate!,
+      detail: c.messageHeadline!,
+      url: e.url ?? null,
+      commit: {
+        sha: c.oid,
+        message: c.message!,
+        additions: c.additions!,
+        deletions: c.deletions!,
+        changedFiles: c.changedFilesIfAvailable ?? null,
+        checks: c.statusCheckRollup?.state ?? null,
+      },
+    };
   }
-  const detail =
-    e.label?.name ??
-    e.assignee?.login ??
-    e.requestedReviewer?.login ??
-    e.requestedReviewer?.name ??
-    e.currentTitle ??
-    e.source?.title ??
-    e.state ??
-    e.stateReason ??
-    null;
-  return { kind, actor: e.actor ?? e.author ?? null, createdAt: e.createdAt!, detail, url: e.source?.url ?? e.url ?? null };
+  // A team asked to review has only a name.
+  const reviewer = e.requestedReviewer;
+  const subject =
+    e.assignee ??
+    (reviewer?.login
+      ? { login: reviewer.login, avatarUrl: reviewer.avatarUrl ?? "", url: reviewer.url ?? null }
+      : reviewer?.name
+        ? { login: reviewer.name, avatarUrl: "", url: null }
+        : undefined);
+  const source = e.source?.__typename ? linkedItem(e.source, e.source.__typename === "PullRequest" ? "pr" : "issue") : undefined;
+  const detail = e.label?.name ?? subject?.login ?? e.currentTitle ?? source?.title ?? e.state ?? e.stateReason ?? null;
+  return {
+    kind,
+    actor: e.actor ?? e.author ?? null,
+    createdAt: e.createdAt!,
+    detail,
+    url: source?.url ?? e.url ?? null,
+    ...(e.label && { label: e.label }),
+    ...(subject && { subject }),
+    ...(e.previousTitle !== undefined && { previousTitle: e.previousTitle }),
+    ...(e.bodyText && { excerpt: excerpt(e.bodyText) }),
+    ...(source && { source }),
+    ...(kind === "merged" && e.commit && { merge: { sha: e.commit.oid, into: e.mergeRefName ?? "" } }),
+    ...(kind === "force_pushed" && { forcePush: { before: e.beforeCommit?.oid ?? null, after: e.afterCommit?.oid ?? null } }),
+  };
 }
 
 type RawLinked = {
@@ -460,16 +595,19 @@ function excerpt(text: string): string {
   return flat.length > EXCERPT_LENGTH ? `${flat.slice(0, EXCERPT_LENGTH).trimEnd()}…` : flat;
 }
 
-// Resolves the issue, PR and discussion links GitHub rendered into bodies (`<a class="issue-link" ...>`) in one query.
+// Resolves the issue, PR and discussion links in bodies (see referenceLinkKind) in one query.
 async function fetchReferences(token: string, htmls: string[]): Promise<Record<string, ReferencedItem>> {
   const refs = new Map<string, { owner: string; repo: string; number: number; discussion: boolean }>();
+  const attr = (tag: string, name: string) => new RegExp(`${name}="([^"]*)"`).exec(tag)?.[1];
   for (const html of htmls) {
-    for (const [tag] of html.matchAll(/<a [^>]*class="issue-link[^>]*>/g)) {
-      const url = /data-url="([^"]+)"/.exec(tag)?.[1];
-      const key = url && referenceKey(url);
+    // The text is what sits directly inside the link; references are plain "#123" text.
+    for (const [, tag, text] of html.matchAll(/(<a [^>]*>)([^<]*)/g)) {
+      const href = attr(tag!, "href") ?? "";
+      const kind = referenceLinkKind({ className: attr(tag!, "class") ?? "", text: text!, href, hovercardType: attr(tag!, "data-hovercard-type") });
+      const key = kind && referenceKey(attr(tag!, "data-url") ?? href);
       if (!key || refs.has(key) || refs.size >= REFERENCE_LIMIT) continue;
       const [, owner, repo, number] = /^(.+)\/(.+)#(\d+)$/.exec(key)!;
-      refs.set(key, { owner, repo, number: Number(number), discussion: /data-hovercard-type="discussion"/.test(tag) });
+      refs.set(key, { owner: owner!, repo: repo!, number: Number(number), discussion: kind === "discussion" });
     }
   }
   if (refs.size === 0) return {};
@@ -519,24 +657,10 @@ export async function fetchItemDetails(token: string, type: ItemType, ref: ItemR
   const raw = data.repository?.item;
   if (!raw) return null;
 
-  const comment = (c: RawComment): ItemComment => ({
-    author: c.author,
-    bodyHTML: c.bodyHTML,
-    createdAt: c.createdAt,
-    url: c.url,
-    isAnswer: c.isAnswer ?? false,
-    upvotes: c.upvoteCount ?? null,
-    replies: c.replies ? { total: c.replies.totalCount, latest: c.replies.nodes.map(comment) } : null,
-  });
-  const comments = (raw.comments.nodes as RawComment[]).map(comment);
-  const answer = type === "discussion" && raw.answer ? comment(raw.answer) : null;
-  const bodies = [raw.bodyHTML, ...[...comments, ...(answer ? [answer] : [])].flatMap((c) => [c.bodyHTML, ...(c.replies?.latest.map((r) => r.bodyHTML) ?? [])])];
-  // The details are still useful without reference states, so a failure here only costs the colors.
-  const references = await fetchReferences(token, bodies).catch((error) => {
-    if (error instanceof GitHubAuthError) throw error;
-    console.error("Resolving references failed", error);
-    return {};
-  });
+  const commentPage = toCommentPage(raw.comments);
+  const comments = commentPage.latest;
+  const answer = type === "discussion" && raw.answer ? toComment(raw.answer) : null;
+  const references = await resolveReferences(token, [raw.bodyHTML, ...commentBodies([...comments, ...(answer ? [answer] : [])])]);
   const timeline =
     type === "discussion"
       ? discussionTimeline(comments)
@@ -555,7 +679,7 @@ export async function fetchItemDetails(token: string, type: ItemType, ref: ItemR
     bodyHTML: raw.bodyHTML,
     labels: raw.labels?.nodes ?? [],
     assignees: raw.assignees?.nodes ?? [],
-    comments: { total: raw.comments.totalCount, latest: comments },
+    comments: commentPage,
     timeline: timeline.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     linked:
       type === "pr"
@@ -571,6 +695,7 @@ export async function fetchItemDetails(token: string, type: ItemType, ref: ItemR
             additions: raw.additions,
             deletions: raw.deletions,
             changedFiles: raw.changedFiles,
+            commits: raw.commitCount.totalCount,
             files: raw.files?.nodes ?? [],
             mergeable: raw.mergeable,
             reviews: raw.latestOpinionatedReviews.nodes,
@@ -801,4 +926,103 @@ export async function fetchItemContext(token: string, type: ItemType, ref: ItemR
     );
   }
   return { updatedAt: raw.updatedAt, text: out.join("\n") };
+}
+
+// Pages of a REST list, up to `maxPages` of 100. Returns the items and whether GitHub has more.
+async function restPages<T>(token: string, path: string, maxPages: number, pick: (body: any) => T[]): Promise<{ items: T[]; truncated: boolean }> {
+  const items: T[] = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const sep = path.includes("?") ? "&" : "?";
+    const res = await fetch(`https://api.github.com${path}${sep}per_page=100&page=${page}`, {
+      headers: { ...headers(token), Accept: "application/vnd.github+json" },
+    });
+    if (res.status === 401) throw new GitHubAuthError("GitHub rejected the session token");
+    if (res.status === 404) return { items, truncated: false };
+    if (!res.ok) throw new Error(`GitHub API ${res.status}: ${await res.text()}`);
+    items.push(...pick(await res.json()));
+    if (!/rel="next"/.test(res.headers.get("Link") ?? "")) return { items, truncated: false };
+  }
+  return { items, truncated: true };
+}
+
+type RawFile = { filename: string; previous_filename?: string; status: DiffFile["status"]; additions: number; deletions: number; patch?: string };
+const toDiffFile = (f: RawFile): DiffFile => ({
+  path: f.filename,
+  previousPath: f.previous_filename ?? null,
+  status: f.status,
+  additions: f.additions,
+  deletions: f.deletions,
+  patch: f.patch ?? null,
+});
+
+const repoPath = (ref: { owner: string; repo: string }) => `/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}`;
+
+/** A PR's commits, oldest first. GitHub's endpoint stops at 250. */
+export async function fetchCommits(token: string, ref: ItemRef): Promise<CommitList> {
+  type RawCommit = {
+    sha: string;
+    html_url: string;
+    commit: { message: string; author: { name: string; date: string } | null };
+    author: { login: string; avatar_url: string; html_url: string } | null;
+  };
+  const { items, truncated } = await restPages(token, `${repoPath(ref)}/pulls/${ref.number}/commits`, 3, (body: RawCommit[]) =>
+    body.map(
+      (c): Commit => ({
+        sha: c.sha,
+        message: c.commit.message,
+        author: c.author ? { login: c.author.login, avatarUrl: c.author.avatar_url, url: c.author.html_url } : null,
+        authorName: c.commit.author?.name ?? "unknown",
+        authoredAt: c.commit.author?.date ?? "",
+        url: c.html_url,
+      }),
+    ),
+  );
+  return { commits: items, truncated };
+}
+
+/** The files changed by a whole PR, or by one commit when `sha` is given. */
+export async function fetchDiff(token: string, ref: ItemRef, sha: string | null): Promise<Diff> {
+  const { items, truncated } = sha
+    ? await restPages(token, `${repoPath(ref)}/commits/${sha}`, 3, (body: { files?: RawFile[] }) => (body.files ?? []).map(toDiffFile))
+    : await restPages(token, `${repoPath(ref)}/pulls/${ref.number}/files`, 3, (body: RawFile[]) => body.map(toDiffFile));
+  return { files: items, truncated };
+}
+
+/**
+ * The page of comments before `before` on an issue, PR (comments and reviews) or discussion, or with `replyTo` (a
+ * discussion comment's or a review's id) the replies or inline comments before it. Oldest first, with the references in their bodies resolved.
+ */
+export async function fetchEarlierComments(
+  token: string,
+  target: { type: ItemType; ref: ItemRef } | { replyTo: string },
+  before: string,
+): Promise<EarlierComments | null> {
+  let page: RawCommentPage | undefined;
+  if ("replyTo" in target) {
+    const data = await graphql(
+      token,
+      `query($id: ID!, $before: String!) { node(id: $id) {
+        ... on DiscussionComment { replies(last: ${COMMENT_PAGE}, before: $before) { ${PAGE_INFO} nodes { ${COMMENT_FIELDS} isAnswer } } }
+        ... on PullRequestReview { replies: comments(last: ${COMMENT_PAGE}, before: $before) { ${PAGE_INFO} nodes { ${REVIEW_COMMENT_FIELDS} } } }
+      } }`,
+      { id: target.replyTo, before },
+    );
+    page = data.node?.replies;
+  } else {
+    const comments =
+      target.type === "discussion"
+        ? `discussion(number: $number) { comments(last: ${DISCUSSION_COMMENT_PAGE}, before: $before) { ${PAGE_INFO} nodes { ${DISCUSSION_COMMENT_FIELDS} } } }`
+        : target.type === "pr"
+          ? `pullRequest(number: $number) { ${prConversation(true)} }`
+          : `issue(number: $number) { comments(last: ${COMMENT_PAGE}, before: $before) { ${PAGE_INFO} nodes { ${COMMENT_FIELDS} } } }`;
+    const data = await graphql(
+      token,
+      `query($owner: String!, $repo: String!, $number: Int!, $before: String!) { repository(owner: $owner, name: $repo) { item: ${comments} } }`,
+      { owner: target.ref.owner, repo: target.ref.repo, number: target.ref.number, before },
+    );
+    page = data.repository?.item?.comments;
+  }
+  if (!page) return null;
+  const { latest, before: earlier } = toCommentPage(page);
+  return { comments: latest, before: earlier, references: await resolveReferences(token, commentBodies(latest)) };
 }

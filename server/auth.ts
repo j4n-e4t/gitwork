@@ -51,7 +51,9 @@ function redirect(location: string, cookies: string[] = []) {
 }
 
 export function currentSession(req: Request): Session | null {
-  const id = readCookie(req, SESSION_COOKIE);
+  // The mobile app has no cookie jar shared with the sign-in page, so it sends the session id as a bearer token.
+  const bearer = req.headers.get("authorization")?.match(/^Bearer ([\w-]+)$/)?.[1];
+  const id = bearer ?? readCookie(req, SESSION_COOKIE);
   return id ? getSession(id) : null;
 }
 
@@ -77,7 +79,7 @@ function failure(message: string, status: number) {
 }
 
 async function finishLogin(req: Request) {
-  const { clientId, clientSecret, allowedUsers } = config();
+  const { clientId, clientSecret } = config();
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
@@ -92,16 +94,61 @@ async function finishLogin(req: Request) {
   const token = tokenBody?.access_token;
   if (!token) return failure(`Sign-in failed: ${tokenBody?.error_description ?? `GitHub returned ${tokenRes.status}`}`, 502);
 
-  const userRes = await fetch("https://api.github.com/user", { headers: { Authorization: `Bearer ${token}`, "User-Agent": "gitwork" } });
-  if (!userRes.ok) return failure(`Sign-in failed: couldn't load your GitHub profile (${userRes.status}).`, 502);
-  const user = (await userRes.json()) as { login: string; avatar_url: string };
-  if (!allowedUsers.has(user.login.toLowerCase())) {
-    return failure(`GitHub user ${user.login} isn't allowed to use this instance (see ALLOWED_USERS).`, 403);
-  }
+  const session = await startSession(token);
+  if ("error" in session) return failure(session.error, session.status);
+  return redirect("/", [cookie(SESSION_COOKIE, session.id, req, SESSION_TTL_MS / 1000), cookie(STATE_COOKIE, "", req, 0)]);
+}
 
+// Creates a session for a fresh GitHub token if its user is allowed in.
+async function startSession(token: string): Promise<{ id: string } | { error: string; status: number }> {
+  const userRes = await fetch("https://api.github.com/user", { headers: { Authorization: `Bearer ${token}`, "User-Agent": "gitwork" } });
+  if (!userRes.ok) return { error: `Sign-in failed: couldn't load your GitHub profile (${userRes.status}).`, status: 502 };
+  const user = (await userRes.json()) as { login: string; avatar_url: string };
+  if (!config().allowedUsers.has(user.login.toLowerCase())) {
+    return { error: `GitHub user ${user.login} isn't allowed to use this instance (see ALLOWED_USERS).`, status: 403 };
+  }
   const id = crypto.randomUUID();
   createSession({ id, token, login: user.login, avatarUrl: user.avatar_url }, SESSION_TTL_MS);
-  return redirect("/", [cookie(SESSION_COOKIE, id, req, SESSION_TTL_MS / 1000), cookie(STATE_COOKIE, "", req, 0)]);
+  return { id };
+}
+
+// GitHub's device flow, used by the mobile app: it shows the user a code to enter at github.com/login/device, then
+// polls until GitHub hands out a token. No callback URL is involved, so it works from any address the phone uses.
+// Requires "Enable Device Flow" in the OAuth app's settings.
+async function startDeviceLogin() {
+  const res = await fetch("https://github.com/login/device/code", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "User-Agent": "gitwork" },
+    body: JSON.stringify({ client_id: config().clientId, scope: SCOPES }),
+  });
+  const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!res.ok || !body?.device_code) {
+    const reason = body?.error === "device_flow_disabled" ? "enable Device Flow in the GitHub OAuth app settings" : `GitHub returned ${res.status}`;
+    return Response.json({ error: `Sign-in failed: ${reason}` }, { status: 502 });
+  }
+  const { device_code, user_code, verification_uri, expires_in, interval } = body;
+  return Response.json({ deviceCode: device_code, userCode: user_code, verificationUri: verification_uri, expiresIn: expires_in, interval });
+}
+
+// Answers 202 while the user hasn't entered the code yet, and the session id once they have.
+async function pollDeviceLogin(req: Request) {
+  const { deviceCode } = ((await req.json().catch(() => null)) ?? {}) as { deviceCode?: unknown };
+  if (typeof deviceCode !== "string") return Response.json({ error: "deviceCode is required" }, { status: 400 });
+  const res = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "User-Agent": "gitwork" },
+    body: JSON.stringify({ client_id: config().clientId, device_code: deviceCode, grant_type: "urn:ietf:params:oauth:grant-type:device_code" }),
+  });
+  const body = (await res.json().catch(() => null)) as { access_token?: string; error?: string; error_description?: string; interval?: number } | null;
+  if (body?.error === "authorization_pending" || body?.error === "slow_down") {
+    return Response.json({ pending: true, interval: body.interval ?? null }, { status: 202 });
+  }
+  if (!body?.access_token) {
+    return Response.json({ error: `Sign-in failed: ${body?.error_description ?? `GitHub returned ${res.status}`}` }, { status: 400 });
+  }
+  const session = await startSession(body.access_token);
+  if ("error" in session) return Response.json({ error: session.error }, { status: session.status });
+  return Response.json({ session: session.id });
 }
 
 function logout(req: Request) {
@@ -114,6 +161,8 @@ function logout(req: Request) {
 export function handleAuth(req: Request, pathname: string): Response | Promise<Response> | null {
   if (pathname === "/auth/login" && req.method === "GET") return startLogin(req);
   if (pathname === "/auth/callback" && req.method === "GET") return finishLogin(req);
+  if (pathname === "/auth/device" && req.method === "POST") return startDeviceLogin();
+  if (pathname === "/auth/device/token" && req.method === "POST") return pollDeviceLogin(req);
   // POST so a link or image on another site can't sign you out.
   if (pathname === "/auth/logout" && req.method === "POST") return logout(req);
   return null;

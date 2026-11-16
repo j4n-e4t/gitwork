@@ -15,8 +15,6 @@ import {
   Check,
   Link2,
   Undo2,
-  ListPlus,
-  ListTodo,
   Lock,
   MessageSquare,
   MessageSquareCheck,
@@ -39,8 +37,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { deadlineLabel } from "@/components/todos";
-import { isClosed, itemKey, type HiddenItem, type LinkedItem, type PullRequest, type ReferencedItem, type Todo, type WorkItem } from "@/lib/api";
+import { isClosed, itemKey, type HiddenItem, type LinkedItem, type PullRequest, type ReferencedItem, type WorkItem } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export type ActionProps = {
@@ -48,8 +45,6 @@ export type ActionProps = {
   hidden: boolean;
   onToggleWatching: () => void;
   onHide: (item: HiddenItem) => void;
-  // Omitted when the todos feature is off, which drops the menu item.
-  onAddTodo?: () => void;
   // The card's compact header uses the small default; the dialog matches its taller header buttons.
   buttonSize?: "icon-xs" | "icon-sm";
 };
@@ -63,8 +58,6 @@ export function copyLink(url: string) {
 
 type Props = ActionProps & {
   onOpen: () => void;
-  // Open todos linked to this item.
-  todos: Todo[];
   // Linked PRs/issues (a PR and the issues it closes) that are also on the board.
   linked: WorkItem[];
   onOpenItem: (item: WorkItem) => void;
@@ -99,7 +92,7 @@ export function stateIcon(item: WorkItem | LinkedItem | ReferencedItem): [Lucide
   return [GitPullRequest, "text-emerald-400", "Open"];
 }
 
-function checksIcon(checks: PullRequest["checks"]): [LucideIcon, string, string] | null {
+export function checksIcon(checks: PullRequest["checks"]): [LucideIcon, string, string] | null {
   if (checks === "SUCCESS") return [CircleCheck, "text-emerald-400", "Checks passing"];
   if (checks === "FAILURE" || checks === "ERROR") return [CircleX, "text-red-400", "Checks failing"];
   if (checks === "PENDING" || checks === "EXPECTED") return [CircleDot, "text-amber-400", "Checks running"];
@@ -127,7 +120,7 @@ function IconHint({ icon: Icon, className, label }: { icon: LucideIcon; classNam
   );
 }
 
-export function ItemCard({ item, hidden, onToggleWatching, onHide, onOpen, todos, onAddTodo, linked, onOpenItem, checkedOff, onCheckOff }: Props) {
+export function ItemCard({ item, hidden, onToggleWatching, onHide, onOpen, linked, onOpenItem, checkedOff, onCheckOff }: Props) {
   const repo = `${item.owner}/${item.repo}`;
   const [StateIcon, stateClass, stateLabel] = stateIcon(item);
   const checks = item.type === "pr" ? checksIcon(item.checks) : null;
@@ -143,7 +136,7 @@ export function ItemCard({ item, hidden, onToggleWatching, onHide, onOpen, todos
           <span className="truncate">{repo}</span>
           <span className="shrink-0 text-muted-foreground/70">#{item.number}</span>
         </span>
-        <ItemActions item={item} hidden={hidden} onToggleWatching={onToggleWatching} onHide={onHide} onAddTodo={onAddTodo} />
+        <ItemActions item={item} hidden={hidden} onToggleWatching={onToggleWatching} onHide={onHide} />
       </div>
 
       <a
@@ -217,7 +210,6 @@ export function ItemCard({ item, hidden, onToggleWatching, onHide, onOpen, todos
               {item.locked && <IconHint icon={Lock} className="text-muted-foreground" label="Locked" />}
             </>
           )}
-          {todos.length > 0 && <TodoBadge todos={todos} />}
           {item.comments > 0 && (
             <span className="flex items-center gap-1" title={`${item.comments} comment${item.comments === 1 ? "" : "s"}`}>
               <MessageSquare className="size-3.5" /> {item.comments}
@@ -246,7 +238,7 @@ export function ItemCard({ item, hidden, onToggleWatching, onHide, onOpen, todos
 }
 
 // The watch star and the "more" menu, shown on the card and in the preview dialog.
-export function ItemActions({ item, hidden, onToggleWatching, onHide, onAddTodo, buttonSize = "icon-xs" }: ActionProps) {
+export function ItemActions({ item, hidden, onToggleWatching, onHide, buttonSize = "icon-xs" }: ActionProps) {
   const watching = item.reasons.includes("watching");
   const involved = item.reasons.some((r) => r !== "watching");
   const repo = `${item.owner}/${item.repo}`;
@@ -284,11 +276,6 @@ export function ItemActions({ item, hidden, onToggleWatching, onHide, onAddTodo,
           <DropdownMenuItem onSelect={() => copyLink(item.url)}>
             <Copy /> Copy link
           </DropdownMenuItem>
-          {onAddTodo && (
-            <DropdownMenuItem onSelect={onAddTodo}>
-              <ListPlus /> Add todo
-            </DropdownMenuItem>
-          )}
           <DropdownMenuSeparator />
           {hidden ? (
             <DropdownMenuItem disabled>
@@ -334,28 +321,5 @@ export function CheckOffButton({ item, checkedOff, onCheckOff }: { item: WorkIte
       {checkedOff ? <Undo2 /> : <Check />}
       {checkedOff ? "Restore" : `Check off · ${stateLabel}`}
     </Button>
-  );
-}
-
-// Red count of open todos; the tooltip lists them with their deadlines.
-function TodoBadge({ todos }: { todos: Todo[] }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Badge variant="destructive" aria-label={`${todos.length} open todo${todos.length === 1 ? "" : "s"}`}>
-          <ListTodo /> {todos.length}
-        </Badge>
-      </TooltipTrigger>
-      <TooltipContent>
-        <ul>
-          {todos.map((t) => (
-            <li key={t.id}>
-              {t.title}
-              {t.deadline && <> · {deadlineLabel(t.deadline).label}</>}
-            </li>
-          ))}
-        </ul>
-      </TooltipContent>
-    </Tooltip>
   );
 }

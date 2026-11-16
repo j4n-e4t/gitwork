@@ -3,7 +3,6 @@ import {
   addDismissed,
   addHidden,
   clearCachedWork,
-  deleteTodo,
   getCachedWork,
   getColumnOrder,
   getPrecedence,
@@ -12,12 +11,10 @@ import {
   listDismissed,
   listHidden,
   listTracked,
-  listTodos,
   removeBookmark,
   removeDismissed,
   removeHidden,
   saveSummary,
-  saveTodo,
   setCachedWork,
   setColumnOrder,
   setPrecedence,
@@ -28,8 +25,8 @@ import {
 } from "./db.ts";
 import { currentSession, endSession, handleAuth } from "./auth.ts";
 import { summarize, summaryAvailable } from "./summary.ts";
-import { fetchItemContext, fetchItemDetails, fetchItemsByRef, fetchProfile, fetchRateLimit, fetchWorkView, GitHubAuthError } from "./github.ts";
-import { authorKey, isClosed, REASONS, type HiddenItem, type ItemType, type Reason, type Todo, type GitHubWorkView } from "./types.ts";
+import { fetchCommits, fetchDiff, fetchEarlierComments, fetchItemContext, fetchItemDetails, fetchItemsByRef, fetchProfile, fetchRateLimit, fetchWorkView, GitHubAuthError } from "./github.ts";
+import { authorKey, isClosed, isHidden, itemKey, REASONS, type HiddenItem, type ItemType, type Reason, type GitHubWorkView } from "./types.ts";
 
 // Accepts "https://github.com/owner/repo/pull/123", ".../issues/123", ".../discussions/123" or "owner/repo#123".
 function parseItemRef(input: unknown): ItemRef | null {
@@ -59,21 +56,6 @@ function parseReasonOrder(input: unknown): Reason[] | null {
   const order = (input as { order?: unknown } | null)?.order;
   if (!Array.isArray(order) || order.length !== REASONS.length) return null;
   return REASONS.every((r) => order.includes(r)) ? (order as Reason[]) : null;
-}
-
-const ITEM_TYPES: ItemType[] = ["pr", "issue", "discussion"];
-const TODO_ID = /^[\w-]{1,64}$/;
-
-function parseTodo(input: unknown, id: string): Omit<Todo, "createdAt"> | null {
-  const { title, deadline, done, link } = (input ?? {}) as Record<string, unknown>;
-  if (!TODO_ID.test(id) || typeof title !== "string" || !title.trim() || title.length > 500) return null;
-  if (deadline !== null && (typeof deadline !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(deadline))) return null;
-  if (typeof done !== "boolean") return null;
-  if (link === null) return { id, title: title.trim(), deadline, done, link: null };
-  const l = (link ?? {}) as Record<string, unknown>;
-  const ref = parseItemRef(`${l.owner}/${l.repo}#${l.number}`);
-  if (!ref || !ITEM_TYPES.includes(l.type as ItemType) || typeof l.title !== "string") return null;
-  return { id, title: title.trim(), deadline, done, link: { ...ref, type: l.type as ItemType, title: l.title } };
 }
 
 // A rejected or under-scoped token ends the session so the client falls back to the sign-in screen; other failures are upstream errors.
@@ -200,7 +182,7 @@ export async function handleRequest(req: Request) {
     const params = new URL(req.url).searchParams;
     const type = params.get("type") as ItemType | null;
     const ref = parseItemRef(`${params.get("owner")}/${params.get("repo")}#${params.get("number")}`);
-    if (!ref || !type || !ITEM_TYPES.includes(type)) {
+    if (!ref || !type || !["pr", "issue", "discussion"].includes(type)) {
       return Response.json({ error: "Expected type (pr|issue|discussion), owner, repo and number" }, { status: 400 });
     }
     if (req.method === "GET") return Response.json(getSummary(ref));
@@ -220,6 +202,41 @@ export async function handleRequest(req: Request) {
       return Response.json({ error: `Summary failed: ${(error as Error).message}` }, { status: 502 });
     }
   }
+  // Earlier comments on an item (?type, owner, repo, number), or earlier replies in a discussion thread (?replyTo=
+  // the comment's id), before the ?before cursor from the previous page.
+  if (pathname === "/api/comments" && req.method === "GET") {
+    const params = new URL(req.url).searchParams;
+    const before = params.get("before");
+    const replyTo = params.get("replyTo");
+    const type = params.get("type") as ItemType | null;
+    const ref = parseItemRef(`${params.get("owner")}/${params.get("repo")}#${params.get("number")}`);
+    // Cursors and node ids are opaque base64-ish strings.
+    const opaque = /^[\w+/=:-]{1,200}$/;
+    const target = replyTo ? (opaque.test(replyTo) ? { replyTo } : null) : ref && type && ["pr", "issue", "discussion"].includes(type) ? { type, ref } : null;
+    if (!target || !before || !opaque.test(before)) {
+      return Response.json({ error: "Expected before, and either replyTo or type (pr|issue|discussion), owner, repo and number" }, { status: 400 });
+    }
+    try {
+      const page = await fetchEarlierComments(session.token, target, before);
+      return page ? Response.json(page) : Response.json({ error: "Not found or no access" }, { status: 404 });
+    } catch (error) {
+      return githubFailure(error, session);
+    }
+  }
+  // A PR's commits, and the diff of the whole PR or of one of its commits (?sha=).
+  if ((pathname === "/api/commits" || pathname === "/api/diff") && req.method === "GET") {
+    const params = new URL(req.url).searchParams;
+    const ref = parseItemRef(`${params.get("owner")}/${params.get("repo")}#${params.get("number")}`);
+    const sha = params.get("sha");
+    if (!ref || (sha !== null && !/^[0-9a-f]{7,40}$/i.test(sha))) {
+      return Response.json({ error: "Expected owner, repo, number and an optional commit sha" }, { status: 400 });
+    }
+    try {
+      return Response.json(pathname === "/api/commits" ? await fetchCommits(session.token, ref) : await fetchDiff(session.token, ref, sha));
+    } catch (error) {
+      return githubFailure(error, session);
+    }
+  }
   if (pathname === "/api/profile" && req.method === "GET") {
     const login = new URL(req.url).searchParams.get("login");
     if (!login || !/^[\w-]+(\[bot\])?$/.test(login)) return Response.json({ error: "Expected a login" }, { status: 400 });
@@ -233,10 +250,18 @@ export async function handleRequest(req: Request) {
   if (pathname === "/api/work" && req.method === "GET") {
     try {
       // ?fresh=1 waits for GitHub; otherwise any cached board is returned immediately.
-      const cached = new URL(req.url).searchParams.has("fresh") ? null : getCachedWork<GitHubWork>(session.login);
+      const params = new URL(req.url).searchParams;
+      const cached = params.has("fresh") ? null : getCachedWork<GitHubWork>(session.login);
       const work = cached?.data ?? (await fetchAndCache(session));
       const stale = cached !== null && Date.now() - cached.fetchedAt > CACHE_FRESH_MS;
-      return Response.json({ ...work, hidden: listHidden(), columnOrder: getColumnOrder(), precedence: getPrecedence(), todos: listTodos(), dismissed: listDismissed(), stale });
+      const hidden = listHidden();
+      const dismissed = listDismissed();
+      // ?visible=1 leaves out hidden and checked-off items, for clients without the web board's "show" toggles (the
+      // mobile app), so its filtering follows the server's rules without a rebuild.
+      const items = params.has("visible")
+        ? work.items.filter((item) => !isHidden(item, hidden) && !(isClosed(item) && dismissed.includes(itemKey(item))))
+        : work.items;
+      return Response.json({ ...work, items, hidden, columnOrder: getColumnOrder(), precedence: getPrecedence(), dismissed, stale });
     } catch (error) {
       return githubFailure(error, session);
     }
@@ -269,17 +294,6 @@ export async function handleRequest(req: Request) {
     if (!item) return Response.json({ error: "Expected { kind: owner|repo|pr, key }" }, { status: 400 });
     if (req.method === "POST") addHidden(item);
     else removeHidden(item);
-    return new Response(null, { status: 204 });
-  }
-  const todoId = pathname.match(/^\/api\/todos\/([^/]+)$/)?.[1];
-  if (todoId && req.method === "PUT") {
-    const todo = parseTodo(await req.json().catch(() => null), todoId);
-    if (!todo) return Response.json({ error: "Expected { title, deadline: YYYY-MM-DD | null, done, link: { type, owner, repo, number, title } | null }" }, { status: 400 });
-    saveTodo(todo);
-    return new Response(null, { status: 204 });
-  }
-  if (todoId && req.method === "DELETE") {
-    deleteTodo(todoId);
     return new Response(null, { status: 204 });
   }
   if (pathname === "/api/precedence" && req.method === "PUT") {

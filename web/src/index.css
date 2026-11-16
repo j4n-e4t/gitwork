@@ -104,7 +104,7 @@
     --accent: oklch(0.269 0 0);
     --accent-foreground: oklch(0.985 0 0);
     --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
+    --border: oklch(1 0 0 / 14%);
     --input: oklch(1 0 0 / 15%);
     --ring: oklch(0.556 0 0);
     --chart-1: oklch(0.87 0 0);
@@ -132,4 +132,51 @@
   html {
     @apply font-sans;
     }
+}
+/* GitHub embeds uploaded videos in rendered bodies as <details><summary>icon, filename, caret</summary><video>, styled
+   by its own CSS. Here it becomes a bordered box with a one-line, collapsible header like on GitHub. Unlayered, so
+   these win over the typography plugin's prose styles (such as its margins on video). */
+.prose details:has(> video) {
+  @apply my-4 overflow-hidden rounded-lg border;
+}
+.prose details:has(> video) > summary {
+  @apply flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:bg-muted;
+}
+.prose details:has(> video) > summary::-webkit-details-marker {
+  display: none;
+}
+.prose details:has(> video) > summary > svg {
+  @apply size-4 shrink-0 fill-current;
+}
+.prose details:has(> video) > summary > span:not(.dropdown-caret) {
+  @apply min-w-0 truncate;
+}
+.prose details:has(> video) > summary > .dropdown-caret {
+  @apply ml-auto size-0 shrink-0 border-x-4 border-t-4 border-x-transparent border-t-current;
+}
+.prose details:not([open]):has(> video) > summary > .dropdown-caret {
+  @apply -rotate-90;
+}
+.prose details:has(> video) > video {
+  @apply my-0 block max-h-[480px] w-full border-t bg-black object-contain;
+}
+
+/* Switching the preview between dialog and full page (a view transition; see toggleFullPage in App). The preview's box
+   morphs between the two sizes and clips the snapshots, which keep their natural size pinned to the top left, so text
+   doesn't stretch while they crossfade. The right-aligned parts (header buttons, avatars, sidebar) have their own names and
+   slide to their new place, rather than showing up twice. The rest of the page crossfades in step. */
+::view-transition-group(*) {
+  animation-duration: 250ms;
+  animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+::view-transition-group(item-preview) {
+  overflow: clip;
+  border-radius: var(--radius-xl);
+}
+::view-transition-old(item-preview),
+::view-transition-new(item-preview) {
+  width: auto;
+  height: auto;
+  object-fit: none;
+  object-position: left top;
 }

@@ -19,12 +19,12 @@ type SettingsProps = {
   // False when the server has no Gemini key, which leaves the switch off and disabled.
   summaryAvailable: boolean;
   onSummaryEnabledChange: (enabled: boolean) => void;
-  todosEnabled: boolean;
-  onTodosEnabledChange: (enabled: boolean) => void;
   showHidden: boolean;
   onShowHiddenChange: (show: boolean) => void;
   showCheckedOff: boolean;
   onShowCheckedOffChange: (show: boolean) => void;
+  diffs: boolean;
+  onDiffsChange: (enabled: boolean) => void;
   columnOrder: Reason[];
   onMoveColumn: (reason: Reason, target: Reason) => void;
   precedence: Reason[];
@@ -69,12 +69,15 @@ export function Settings(props: SettingsProps) {
           checked={props.summaryEnabled}
           onCheckedChange={props.onSummaryEnabledChange}
         />
+      </Section>
+
+      <Section title="Experimental" description="Features that are still being worked on. Saved in this browser.">
         <SwitchRow
-          id="feature-todos"
-          label="Todos"
-          description="Tasks with optional deadlines, linked to items if you like: a Todos view, counts on cards and a Todos tab in the preview."
-          checked={props.todosEnabled}
-          onCheckedChange={props.onTodosEnabledChange}
+          id="diffs"
+          label="Diffs"
+          description="The Files changed tab on pull requests, and opening a commit's diff from History."
+          checked={props.diffs}
+          onCheckedChange={props.onDiffsChange}
         />
       </Section>
 

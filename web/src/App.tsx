@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { flushSync } from "react-dom";
 import {
   AlertCircle,
   ArrowLeft,
@@ -9,7 +10,6 @@ import {
   GripVertical,
   LogIn,
   LogOut,
-  Plus,
   RefreshCw,
   Settings as SettingsIcon,
   Star,
@@ -18,7 +18,7 @@ import { CollapsedColumn } from "@/components/collapsed-column";
 import { CheckOffButton, ItemActions, ItemCard } from "@/components/item-card";
 import { ItemPreview } from "@/components/item-preview";
 import { Settings } from "@/components/settings";
-import { ItemTodos, newTodo, linkOf, TodoBoard, TodoDialog } from "@/components/todos";
+import { ViewerContext } from "@/components/user-link";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -37,8 +37,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
+import { parseAsBoolean, parseAsInteger, parseAsString, useQueryStates } from "nuqs";
 import {
   api,
+  inColumn,
   isClosed,
   isHidden,
   itemKey,
@@ -54,11 +56,10 @@ import {
   type MissingBookmark,
   type RateLimit,
   type Reason,
-  type Todo,
   type WorkItem,
   type WorkView,
 } from "@/lib/api";
-import { COLUMNS, MODES, TODOS_MODE, type Mode } from "@/lib/board";
+import { COLUMNS, MODES, type Mode } from "@/lib/board";
 import { cn } from "@/lib/utils";
 
 // The mode and display toggles are per-browser conveniences; storage can be unavailable (private mode), so
@@ -99,10 +100,11 @@ const BOARD_STORAGE_KEY = "work-view:board";
 type StoredBoard = { login: string; view: WorkView };
 const SHOW_CHECKED_OFF_STORAGE_KEY = "work-view:show-checked-off";
 const SHOW_HIDDEN_STORAGE_KEY = "work-view:show-hidden";
+// Feature flag for the diff viewer (Settings → Experimental); off unless turned on in this browser.
+const DIFFS_STORAGE_KEY = "work-view:diffs";
 const COLLAPSED_STORAGE_KEY = "work-view:collapsed";
-// Optional features toggled in Settings; both are off until turned on.
+// Optional feature toggled in Settings; off until turned on.
 const SUMMARY_FEATURE_STORAGE_KEY = "work-view:feature-summary";
-const TODOS_FEATURE_STORAGE_KEY = "work-view:feature-todos";
 
 function readStoredCollapsed(): string[] {
   try {
@@ -113,9 +115,8 @@ function readStoredCollapsed(): string[] {
   }
 }
 
-// The todos view only counts while that feature is on.
-const readStoredMode = (todosEnabled: boolean): Mode =>
-  [...MODES, ...(todosEnabled ? [TODOS_MODE] : [])].find((m) => m.value === readStored(MODE_STORAGE_KEY))?.value ?? "pr";
+const readStoredMode = (): Mode =>
+  MODES.find((m) => m.value === readStored(MODE_STORAGE_KEY))?.value ?? "pr";
 
 // Settings is a hash route so the browser's back button returns to the board.
 const SETTINGS_HASH = "#settings";
@@ -128,12 +129,6 @@ function useSettingsRoute() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
   return open;
-}
-
-// An item appears only in the column of its highest-ranked reason. Its other reasons stay on the item, so the
-// star still reflects whether it's watched.
-function inColumn(item: WorkItem, reason: Reason, precedence: Reason[]) {
-  return precedence.find((r) => item.reasons.includes(r)) === reason;
 }
 
 // Pairs each PR with the issues it closes, in both directions, when both are among `items`.
@@ -174,7 +169,11 @@ export function App() {
   if (me === undefined) return null;
   if (me === null) return <SignIn />;
   // Keyed by login so a different account never starts from the previous one's board.
-  return <Board key={me.login} me={me} onSignedOut={signedOut} />;
+  return (
+    <ViewerContext value={me.login}>
+      <Board key={me.login} me={me} onSignedOut={signedOut} />
+    </ViewerContext>
+  );
 }
 
 function SignIn() {
@@ -281,11 +280,11 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
   const [summaryEnabled, setSummaryEnabled] = useState(() => readStored(SUMMARY_FEATURE_STORAGE_KEY) === "true");
   // The saved choice is kept, but the feature only works while the server has a Gemini key.
   const summaryOn = summaryEnabled && me.summaryAvailable === true;
-  const [todosEnabled, setTodosEnabled] = useState(() => readStored(TODOS_FEATURE_STORAGE_KEY) === "true");
-  const [mode, setMode] = useState<Mode>(() => readStoredMode(todosEnabled));
+  const [mode, setMode] = useState<Mode>(readStoredMode);
   const [showCheckedOff, setShowCheckedOff] = useState(() => readStored(SHOW_CHECKED_OFF_STORAGE_KEY) === "true");
+  const [diffs, setDiffs] = useState(() => readStored(DIFFS_STORAGE_KEY) === "true");
   const settingsOpen = useSettingsRoute();
-  // Collapsed column keys: a Reason for item columns, "todo:<bucket>" for todo columns.
+  // Collapsed columns, by Reason.
   const [collapsed, setCollapsed] = useState(readStoredCollapsed);
   const [bookmarkInput, setBookmarkInput] = useState("");
   // Local order wins once the user rearranges, so a reload can't snap columns back mid-save.
@@ -293,10 +292,38 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
   const [localPrecedence, setLocalPrecedence] = useState<Reason[] | null>(null);
   const [dragging, setDragging] = useState<Reason | null>(null);
   const [dropTarget, setDropTarget] = useState<Reason | null>(null);
-  const [previewItem, setPreviewItem] = useState<WorkItem | null>(null);
+  // The previewed item lives in the URL (?repo=owner/name&number=123, plus &full=true for the full-page view), so it
+  // survives reloads and can be linked to. Opening and closing push history entries, so Back closes the preview.
+  const [previewParams, setPreviewParams] = useQueryStates(
+    { repo: parseAsString, number: parseAsInteger, full: parseAsBoolean.withDefault(false) },
+    { history: "push" },
+  );
+  const setPreviewItem = useCallback(
+    (item: WorkItem | null) =>
+      setPreviewParams(item ? { repo: `${item.owner}/${item.repo}`, number: item.number } : { repo: null, number: null, full: null }),
+    [setPreviewParams],
+  );
+  // Resolved from the board once, then kept while the URL points at it: the preview holds the item as it was when
+  // opened (previewCurrent below has the board's latest copy), and a refresh that drops the item doesn't close it.
+  const lastPreview = useRef<WorkItem | null>(null);
+  const previewItem = (() => {
+    const [owner, repo] = previewParams.repo?.split("/") ?? [];
+    if (!owner || !repo || previewParams.number === null) return (lastPreview.current = null);
+    const target = { owner, repo, number: previewParams.number };
+    if (lastPreview.current && sameItem(lastPreview.current, target)) return lastPreview.current;
+    return (lastPreview.current = view?.items.find((i) => sameItem(i, target)) ?? null);
+  })();
+  // The full-page preview replaces the board, which stays mounted but hidden so its scroll positions survive.
+  const fullPage = previewParams.full && previewItem !== null;
+  // Switching between dialog and full page morphs one into the other with a view transition: the browser snapshots
+  // both states and animates between them, so nothing is laid out again mid-animation. flushSync makes the DOM
+  // change inside the callback, where the transition expects it. Without support (or with reduced motion) it switches.
+  const toggleFullPage = () => {
+    const update = () => flushSync(() => void setPreviewParams({ full: previewParams.full ? null : true }));
+    if (!document.startViewTransition || matchMedia("(prefers-reduced-motion: reduce)").matches) update();
+    else document.startViewTransition(update);
+  };
   // Bookmarks added but not yet resolved by GitHub, shown as placeholder cards in Watching.
-  // The todo in the create/edit dialog.
-  const [todoDraft, setTodoDraft] = useState<Todo | null>(null);
   const [pendingBookmarks, setPendingBookmarks] = useState<(MissingBookmark & { type: ItemType })[]>([]);
   const loadSeq = useRef(0);
   const pendingMutations = useRef(0);
@@ -394,7 +421,7 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
       toast.info(`${itemKey(ref)} is already on the board`);
       return;
     }
-    const pending = ref && { ...ref, type: ref.type ?? (mode === "todos" ? "pr" : mode) };
+    const pending = ref && { ...ref, type: ref.type ?? mode };
     if (pending) setPendingBookmarks((p) => [...p.filter((b) => !sameItem(b, pending)), pending]);
     if (await mutate(() => api.setWatching(input, true))) {
       toast.success(`Watching ${ref ? itemKey(ref) : input.trim()}`);
@@ -406,25 +433,6 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
 
   const error = actionError ?? loadError;
 
-  const saveTodo = (todo: Todo) =>
-    mutate(
-      () => api.saveTodo(todo),
-      (v) => ({
-        ...v,
-        todos: v.todos.some((t) => t.id === todo.id) ? v.todos.map((t) => (t.id === todo.id ? todo : t)) : [...v.todos, todo],
-      }),
-    );
-
-  const deleteTodo = (todo: Todo) =>
-    mutate(
-      () => api.deleteTodo(todo.id),
-      (v) => ({ ...v, todos: v.todos.filter((t) => t.id !== todo.id) }),
-    );
-
-  const todos = view?.todos ?? [];
-  const openTodosFor = (item: WorkItem) =>
-    todos.filter((t) => !t.done && t.link && sameItem(t.link, item) && t.link.type === item.type);
-
   function changeMode(next: Mode) {
     setMode(next);
     writeStored(MODE_STORAGE_KEY, next);
@@ -435,15 +443,14 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
     writeStored(SUMMARY_FEATURE_STORAGE_KEY, String(next));
   }
 
-  function changeTodosEnabled(next: boolean) {
-    setTodosEnabled(next);
-    writeStored(TODOS_FEATURE_STORAGE_KEY, String(next));
-    if (!next && mode === "todos") changeMode("pr");
-  }
-
   function changeShowCheckedOff(next: boolean) {
     setShowCheckedOff(next);
     writeStored(SHOW_CHECKED_OFF_STORAGE_KEY, String(next));
+  }
+
+  function changeDiffs(next: boolean) {
+    setDiffs(next);
+    writeStored(DIFFS_STORAGE_KEY, String(next));
   }
 
   // Checking off is how a closed or merged item leaves the board; it's never removed automatically.
@@ -470,8 +477,7 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
   // One saved order covers both modes; columns that don't apply to the current mode are skipped.
   const columnOrder = resolveReasonOrder(localOrder ?? view?.columnOrder ?? null);
   const precedence = resolveReasonOrder(localPrecedence ?? view?.precedence ?? null);
-  // The todos view has its own columns.
-  const visibleColumns = mode === "todos" ? [] : columnOrder.filter((r) => reasonApplies(r, mode));
+  const visibleColumns = columnOrder.filter((r) => reasonApplies(r, mode));
 
   function moveColumn(reason: Reason, target: Reason) {
     if (reason === target) return;
@@ -494,7 +500,6 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
   // The preview holds the item as it was when opened; its actions need the board's current copy (watching, state).
   // An item no longer on the board was only watched and has just been unwatched.
   const previewCurrent = previewItem && (view?.items.find((i) => i.url === previewItem.url) ?? { ...previewItem, reasons: [] });
-  const previewTodos = previewCurrent ? openTodosFor(previewCurrent) : [];
   const previewActions = previewCurrent && (
     <>
       <CheckOffButton item={previewCurrent} checkedOff={isCheckedOff(previewCurrent)} onCheckOff={(c) => setCheckedOff(previewCurrent, c)} />
@@ -503,7 +508,6 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
         hidden={isHidden(previewCurrent, hidden)}
         onToggleWatching={() => toggleWatching(previewCurrent)}
         onHide={(item) => setHidden(item, true)}
-        onAddTodo={todosEnabled ? () => setTodoDraft(newTodo(linkOf(previewCurrent))) : undefined}
         buttonSize="icon-sm"
       />
     </>
@@ -513,14 +517,13 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
   );
   const modeItems = visibleItems.filter((item) => item.type === mode);
   const linkedItems = linksBetween(visibleItems);
-  const countOfMode = (m: Mode) =>
-    m === "todos" ? todos.filter((t) => !t.done).length : visibleItems.filter((item) => item.type === m).length;
-  const currentMode = [...MODES, TODOS_MODE].find((m) => m.value === mode) ?? MODES[0];
+  const countOfMode = (m: Mode) => visibleItems.filter((item) => item.type === m).length;
+  const currentMode = MODES.find((m) => m.value === mode) ?? MODES[0];
   const CurrentModeIcon = currentMode.icon;
 
   return (
     <div className="flex h-dvh flex-col">
-      <header className="flex flex-wrap items-center gap-3 border-b px-4 py-3">
+      <header hidden={fullPage} className="flex flex-wrap items-center gap-3 border-b px-4 py-3">
         {settingsOpen ? (
           <div className="mr-auto flex items-center gap-2">
             <Button variant="ghost" size="icon" asChild>
@@ -542,11 +545,7 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
               </span>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    className="-ml-2.5"
-                    aria-label={todosEnabled ? "Show pull requests, issues, discussions or todos" : "Show pull requests, issues or discussions"}
-                  >
+                  <Button variant="ghost" className="-ml-2.5" aria-label="Show pull requests, issues or discussions">
                     <CurrentModeIcon /> {currentMode.label}
                     {view && <span className="text-muted-foreground">{countOfMode(mode)}</span>}
                     <ChevronsUpDown className="text-muted-foreground" />
@@ -560,37 +559,22 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
                         {view && <span className="ml-auto text-muted-foreground">{countOfMode(value)}</span>}
                       </DropdownMenuRadioItem>
                     ))}
-                    {todosEnabled && (
-                      <>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuRadioItem value={TODOS_MODE.value}>
-                          <TODOS_MODE.icon /> {TODOS_MODE.label}
-                          {view && <span className="ml-auto text-muted-foreground">{countOfMode("todos")}</span>}
-                        </DropdownMenuRadioItem>
-                      </>
-                    )}
                   </DropdownMenuRadioGroup>
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
-            {mode === "todos" ? (
-              <Button onClick={() => setTodoDraft(newTodo())} disabled={!view}>
-                <Plus /> New todo
+            <form onSubmit={addBookmark} className="flex w-full gap-2 sm:w-96">
+              <Input
+                value={bookmarkInput}
+                onChange={(e) => setBookmarkInput(e.target.value)}
+                placeholder="Watch a PR, issue or discussion: URL or owner/repo#123"
+                aria-label="PR, issue or discussion to watch"
+                required
+              />
+              <Button type="submit" variant="secondary">
+                <Star /> Watch
               </Button>
-            ) : (
-              <form onSubmit={addBookmark} className="flex w-full gap-2 sm:w-96">
-                <Input
-                  value={bookmarkInput}
-                  onChange={(e) => setBookmarkInput(e.target.value)}
-                  placeholder="Watch a PR, issue or discussion: URL or owner/repo#123"
-                  aria-label="PR, issue or discussion to watch"
-                  required
-                />
-                <Button type="submit" variant="secondary">
-                  <Star /> Watch
-                </Button>
-              </form>
-            )}
+            </form>
             <Button variant="outline" size="icon" onClick={() => load(true)} disabled={loading} aria-label="Refresh">
               <RefreshCw className={loading ? "animate-spin" : undefined} />
             </Button>
@@ -600,23 +584,23 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
       </header>
 
       {error && (
-        <p role="alert" className="flex items-center gap-2 border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">
+        <p hidden={fullPage} role="alert" className="flex items-center gap-2 border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">
           <AlertCircle className="size-4" /> {error}
         </p>
       )}
 
       {settingsOpen ? (
-        <main className="min-h-0 flex-1 overflow-y-auto">
+        <main hidden={fullPage} className="min-h-0 flex-1 overflow-y-auto">
           <Settings
             summaryEnabled={summaryOn}
             summaryAvailable={me.summaryAvailable === true}
             onSummaryEnabledChange={changeSummaryEnabled}
-            todosEnabled={todosEnabled}
-            onTodosEnabledChange={changeTodosEnabled}
             showHidden={showHidden}
             onShowHiddenChange={changeShowHidden}
             showCheckedOff={showCheckedOff}
             onShowCheckedOffChange={changeShowCheckedOff}
+            diffs={diffs}
+            onDiffsChange={changeDiffs}
             columnOrder={columnOrder}
             precedence={precedence}
             onMovePrecedence={movePrecedence}
@@ -627,19 +611,7 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
           />
         </main>
       ) : (
-        <main className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-4">
-          {mode === "todos" && (
-            <TodoBoard
-              todos={todos}
-              items={view?.items ?? []}
-              onSave={saveTodo}
-              onDelete={deleteTodo}
-              onEdit={setTodoDraft}
-              onOpenItem={setPreviewItem}
-              collapsed={collapsed}
-              onToggleCollapsed={toggleCollapsed}
-            />
-          )}
+        <main hidden={fullPage} className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-4">
           {visibleColumns.map((reason, index) => {
             const { title, icon: Icon } = COLUMNS[reason];
             const items = modeItems.filter((item) => inColumn(item, reason, precedence));
@@ -748,8 +720,6 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
                             onToggleWatching={() => toggleWatching(item)}
                             onHide={(item) => setHidden(item, true)}
                             onOpen={() => setPreviewItem(item)}
-                            todos={todosEnabled ? openTodosFor(item) : []}
-                            onAddTodo={todosEnabled ? () => setTodoDraft(newTodo(linkOf(item))) : undefined}
                             linked={linkedItems.get(item.url) ?? []}
                             onOpenItem={setPreviewItem}
                             checkedOff={isCheckedOff(item)}
@@ -771,37 +741,16 @@ function Board({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
           })}
         </main>
       )}
-      <TodoDialog
-        todo={todoDraft}
-        isNew={!todos.some((t) => t.id === todoDraft?.id)}
-        // Only what the board shows without the dimmed hidden items: no hidden ones, and closed ones only if enabled.
-        items={(view?.items ?? []).filter((item) => !isHidden(item, hidden) && !isCheckedOff(item))}
-        onSave={(todo) => {
-          setTodoDraft(null);
-          saveTodo(todo);
-        }}
-        onClose={() => setTodoDraft(null)}
-      />
       <ItemPreview
         item={previewItem}
         actions={previewActions}
         summaryEnabled={summaryOn}
-        todosEnabled={todosEnabled}
-        todoCount={previewTodos.length}
         boardItems={view?.items ?? []}
         onOpenItem={setPreviewItem}
-        todos={
-          previewCurrent && (
-            <ItemTodos
-              todos={previewTodos}
-              onSave={saveTodo}
-              onDelete={deleteTodo}
-              onEdit={setTodoDraft}
-              onAdd={() => setTodoDraft(newTodo(linkOf(previewCurrent)))}
-            />
-          )
-        }
         onClose={() => setPreviewItem(null)}
+        fullscreen={previewParams.full}
+        onToggleFullscreen={toggleFullPage}
+        diffs={diffs}
         onSignedOut={onSignedOut}
       />
       <Toaster />

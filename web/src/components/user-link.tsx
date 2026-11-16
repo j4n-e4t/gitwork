@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { createContext, useContext, useEffect, useState, type ReactElement } from "react";
 import { Avatar, AvatarFallback, AvatarGroup, AvatarGroupCount, AvatarImage } from "@/components/ui/avatar";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -7,6 +7,9 @@ import { cn } from "@/lib/utils";
 
 // Enough to show a user: Person has all of it; a mention in a body only has the login.
 type User = { login: string; avatarUrl?: string; url?: string | null };
+
+/** The signed-in user's login, so mentions of them can be highlighted like GitHub does. */
+export const ViewerContext = createContext<string | null>(null);
 
 // The one way a user is shown: avatar, name and a profile hover card. `pill` is for mentions inside text, so they
 // read as references like issue links do. `avatar={false}` is for places that already show the avatar elsewhere.
@@ -22,7 +25,10 @@ export function UserLink({
   avatar?: boolean;
   className?: string;
 }) {
+  const viewer = useContext(ViewerContext);
   if (!user) return <span className={cn("font-medium text-foreground", className)}>ghost</span>;
+  // Mentions of the signed-in user stand out in amber, as on GitHub.
+  const isViewer = pill && viewer !== null && user.login.toLowerCase() === viewer.toLowerCase();
   // Commit authors without a GitHub account have a git name but no profile.
   const url = user.url === undefined ? `https://github.com/${user.login}` : user.url;
   const content = (
@@ -35,7 +41,9 @@ export function UserLink({
     "font-medium text-foreground",
     // Without the avatar it stays plain inline text, so a surrounding `truncate` can still cut it off.
     avatar && "inline-flex max-w-full items-center gap-1.5 align-bottom",
-    pill ? "gap-1 rounded-md bg-muted px-1.5 align-middle hover:bg-accent" : "hover:underline",
+    pill && "gap-1 rounded-md px-1.5 align-middle",
+    pill && (isViewer ? "bg-amber-400/15 text-amber-300 hover:bg-amber-400/25" : "bg-muted hover:bg-accent"),
+    !pill && "hover:underline",
     className,
   );
   if (!url) return <span className={linkClass}>{content}</span>;
